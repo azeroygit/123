@@ -198,6 +198,9 @@ local DEFAULT_SETTINGS = {
     PhoneUpgradeSteps   = 4,       -- how deep the upgrade chain may go
     PhoneMaxListings    = 2,
     PhoneAutoLearn      = true,    -- dump the phone face and remember real button paths
+    PhoneAutoOffer      = false,   -- search listings on the phone and send profitable offers
+    PhoneOfferEvery     = 90,      -- seconds between listing searches
+    PhoneAutoTravel     = true,    -- use TRAVEL TO HUB when Robo Todd is far away
     PhoneCreatePath     = "",
     PhoneNextPath       = "",
     PhonePostPath       = "",
@@ -272,7 +275,7 @@ local E = {
     requestIndex = 0,
     stats = { accepted = 0, declined = 0, offers = 0, giveV = 0, getV = 0 },
     lastPostAt = os.time(),
-    phone = { listings = {}, cards = 0, nextAt = 0, openAt = 0, createAt = 0, bucks = 0, learnAt = 0 },
+    phone = { listings = {}, cards = 0, nextAt = 0, openAt = 0, createAt = 0, bucks = 0, learnAt = 0, offerAt = 0, travelAt = 0 },
     inv = { items = {}, at = 0, total = 0, count = 0, busy = false },
 }
 
@@ -2505,6 +2508,10 @@ local function classifyWindow(win)
     for _, d in ipairs(win:GetDescendants()) do
         if d:IsA("TextLabel") and isVisible(d) and d.Text ~= "" then
             local t = d.Text:lower()
+            if t:find("post a listing", 1, true) or t:find("view my listings", 1, true)
+                or t:find("trading hub", 1, true) or t:find("post listing", 1, true) then
+                return "phone"
+            end
             if t:find("history", 1, true) then hasHistory = true
             elseif t:find("listing", 1, true) then hasListing = true end
             if hasHistory and hasListing then return "phone" end
@@ -3397,7 +3404,7 @@ local function uiRoot(obj)
     return p or obj
 end
 
--- smallest container that holds the three tab labels of the phone
+-- smallest container that holds the labels of the trade phone / Robo Todd window
 local function findPhoneWindow()
     local pg = getPlayerGui()
     if not pg then return nil end
@@ -3406,12 +3413,23 @@ local function findPhoneWindow()
         if d:IsA("TextLabel") and isVisible(d) and d.Text ~= "" then
             local t = d.Text:lower()
             local key
-            if t:find("history", 1, true) then key = "history"
-            elseif t:find("listing", 1, true) then key = "listings"
-            elseif t:find("offer", 1, true) then key = "offers" end
+            if t:find("post a listing", 1, true) or t:find("view my listings", 1, true)
+                or t:find("trading hub", 1, true) then
+                key = "hub"
+            elseif t:find("post listing", 1, true) then
+                key = "post"
+            elseif t:find("for listing", 1, true) then
+                key = "offers"
+            elseif t:find("history", 1, true) then
+                key = "history"
+            elseif t:find("listing", 1, true) then
+                key = "listings"
+            elseif t:find("offer", 1, true) then
+                key = "offers"
+            end
             if key then
                 local p, depth = d, 0
-                while p and p ~= pg and depth < 9 do
+                while p and p ~= pg and depth < 10 do
                     if p:IsA("GuiObject") then
                         local m = marks[p]
                         if not m then m = {}; marks[p] = m end
@@ -3425,10 +3443,12 @@ local function findPhoneWindow()
     end
     local best, bestArea = nil, math.huge
     for obj, m in pairs(marks) do
-        if m.history and (m.listings or m.offers) then
+        local count = 0
+        for _ in pairs(m) do count += 1 end
+        if (count >= 2) or m.hub or m.post then
             local sz = obj.AbsoluteSize
             local area = math.max(sz.X, 1) * math.max(sz.Y, 1)
-            if area > 20000 and area < bestArea then best, bestArea = obj, area end
+            if area > 15000 and area < bestArea then best, bestArea = obj, area end
         end
     end
     return best
@@ -3454,9 +3474,57 @@ local function phoneClick(btn, what)
     return true
 end
 
+-- the phone is a Tool, so it can be used straight from the backpack
+local function findPhoneTool()
+    local function isPhone(name)
+        local n = tostring(name or ""):lower()
+        return n:find("phone", 1, true) ~= nil
+    end
+    local bp = LocalPlayer:FindFirstChild("Backpack")
+    if bp then
+        for _, t in ipairs(bp:GetChildren()) do
+            if t:IsA("Tool") and isPhone(t.Name) then return t, false end
+        end
+    end
+    local char = LocalPlayer.Character
+    if char then
+        for _, t in ipairs(char:GetChildren()) do
+            if t:IsA("Tool") and isPhone(t.Name) then return t, true end
+        end
+    end
+    return nil
+end
+
 local function phoneClickToy()
     local pg = getPlayerGui()
     if not pg then return false end
+
+    -- 1. the toy itself: equip it and activate, no clicking needed
+    local tool, equipped = findPhoneTool()
+    if tool then
+        if equipped then
+            log("phone: the phone toy is already in hand")
+        elseif S.PhoneDryRun then
+            log("phone (dry): would equip and use the tool \"%s\"", tostring(tool.Name))
+            return false
+        else
+            local char = LocalPlayer.Character
+            local hum = char and char:FindFirstChildOfClass("Humanoid")
+            if hum then
+                if pcall(function() hum:EquipTool(tool) end) then
+                    log("phone: equipped \"%s\"", tostring(tool.Name))
+                    task.wait(0.5)
+                end
+            end
+        end
+        if not S.PhoneDryRun then
+            pcall(function() tool:Activate() end)
+            task.wait(0.9)
+            if findPhoneWindow() then return true end
+        end
+    end
+
+    -- 2. fall back to a button that looks like the phone
     local function scan()
         for _, d in ipairs(pg:GetDescendants()) do
             if d:IsA("GuiButton") and isVisible(d) then
@@ -4111,6 +4179,502 @@ local function findLearnedBtn(root, key, words, avoid)
     return btn
 end
 
+--============================================================== 9f. real listing flow
+-- Verified against the live Trading Hub UI:
+--   Robo Todd window: "POST A LISTING" / "VIEW MY LISTINGS"
+--   -> POST LISTING screen: panels "You" and "Them", green + buttons
+--   -> backpack (input "Enter Search...") or journal -> pick the pet
+--   -> "POST LISTING" -> "Successfully posted listing!" -> "Okay"
+local function commonAncestor(a, b)
+    if not a or not b then return nil end
+    local set = {}
+    local p, guard = a, 0
+    while p and guard < 24 do set[p] = true; p = p.Parent; guard += 1 end
+    p, guard = b, 0
+    while p and guard < 24 do
+        if set[p] then return p end
+        p = p.Parent
+        guard += 1
+    end
+    return nil
+end
+
+local function labelExact(root, text)
+    local want = text:lower()
+    for _, d in ipairs(root:GetDescendants()) do
+        if d:IsA("TextLabel") and isVisible(d) and d.Text ~= "" then
+            local t = d.Text:gsub("^%s+", ""):gsub("%s+$", ""):lower()
+            if t == want then return d end
+        end
+    end
+    return nil
+end
+
+local function visibleLabels(root, words)
+    local out = {}
+    for _, d in ipairs(root:GetDescendants()) do
+        if d:IsA("TextLabel") and isVisible(d) and d.Text ~= "" and textMatches(d.Text, words) then
+            out[#out + 1] = d
+        end
+    end
+    return out
+end
+
+local function clickableForLabel(label)
+    local p, guard = label.Parent, 0
+    while p and guard < 6 do
+        if p:IsA("GuiButton") and isVisible(p) then return p end
+        p = p.Parent
+        guard += 1
+    end
+    local parent = label.Parent
+    if parent then
+        for _, c in ipairs(parent:GetChildren()) do
+            if c:IsA("GuiButton") and isVisible(c) then return c end
+        end
+    end
+    return nil
+end
+
+-- the button behind a text; bottom = pick the lowest one (header and footer
+-- share the same words on the POST LISTING screen)
+local function clickLabel(root, words, bottom)
+    local pick, pickY
+    for _, d in ipairs(visibleLabels(root, words)) do
+        local btn = clickableForLabel(d)
+        local obj = btn or d
+        local y = obj.AbsolutePosition.Y
+        if not pick or (bottom and y > pickY) or (not bottom and y < pickY) then
+            pick, pickY = obj, y
+        end
+    end
+    return pick
+end
+
+local function isGreenish(btn)
+    local ok, c = pcall(function() return btn.BackgroundColor3 end)
+    if not ok or c == nil then return false end
+    local ok2, r, g, b = pcall(function() return c.R, c.G, c.B end)
+    if not ok2 or not r then return false end
+    return g > 0.4 and g > r * 1.1 and g > b * 1.1
+end
+
+-- the green "+" slots of the two panels, left to right
+local function plusButtons(root, minY, maxY)
+    local out = {}
+    for _, d in ipairs(root:GetDescendants()) do
+        if d:IsA("GuiButton") and isVisible(d) then
+            local sz = d.AbsoluteSize
+            local y = d.AbsolutePosition.Y
+            if sz.X >= 34 and sz.Y >= 34 and sz.X <= 170 and sz.Y <= 170
+                and y >= (minY or 0) and y <= (maxY or 1e6) then
+                local img = ""
+                pcall(function() img = tostring(d.Image or "") end)
+                if guiText(d) == "" and (isGreenish(d) or textMatches(img, { "plus", "add", "green" })) then
+                    out[#out + 1] = d
+                end
+            end
+        end
+    end
+    table.sort(out, function(a, b)
+        if math.abs(a.AbsolutePosition.X - b.AbsolutePosition.X) < 10 then
+            return a.AbsolutePosition.Y < b.AbsolutePosition.Y
+        end
+        return a.AbsolutePosition.X < b.AbsolutePosition.X
+    end)
+    return out
+end
+
+local function searchBoxIn(root)
+    local first
+    for _, d in ipairs(root:GetDescendants()) do
+        if d:IsA("TextBox") and isVisible(d) then
+            local ph = ""
+            pcall(function() ph = tostring(d.PlaceholderText or "") end)
+            if ph:lower():find("search", 1, true) then return d end
+            first = first or d
+        end
+    end
+    return first
+end
+
+-- the backpack window = smallest container that holds its title and its search box
+local function backpackRoot(pg)
+    local label, box
+    for _, d in ipairs(pg:GetDescendants()) do
+        if not label and d:IsA("TextLabel") and isVisible(d) and d.Text ~= ""
+            and d.Text:lower():find("backpack", 1, true) then
+            label = d
+        end
+        if not box and d:IsA("TextBox") and isVisible(d) then
+            local ph = ""
+            pcall(function() ph = tostring(d.PlaceholderText or "") end)
+            if ph:lower():find("search", 1, true) then box = d end
+        end
+    end
+    if label and box then
+        return commonAncestor(label, box) or box.Parent, box
+    end
+    if box then return box.Parent, box end
+    return nil, nil
+end
+
+local function gridOf(root)
+    local best, bestArea
+    for _, d in ipairs(root:GetDescendants()) do
+        if d:IsA("ScrollingFrame") and isVisible(d) then
+            local sz = d.AbsoluteSize
+            local area = sz.X * sz.Y
+            if area > 3000 and (not bestArea or area > bestArea) then best, bestArea = d, area end
+        end
+    end
+    return best
+end
+
+local function tilesOf(grid)
+    local out = {}
+    if not grid then return out end
+    for _, d in ipairs(grid:GetDescendants()) do
+        if (d:IsA("ImageButton") or d:IsA("TextButton")) and isVisible(d) then
+            local sz = d.AbsoluteSize
+            if sz.X >= 26 and sz.X <= 170 and sz.Y >= 26 and sz.Y <= 170 then
+                out[#out + 1] = d
+            end
+        end
+    end
+    table.sort(out, function(a, b)
+        local ay, by = a.AbsolutePosition.Y, b.AbsolutePosition.Y
+        if math.abs(ay - by) < 12 then return a.AbsolutePosition.X < b.AbsolutePosition.X end
+        return ay < by
+    end)
+    return out
+end
+
+local function typeSearch(box, text)
+    if S.PhoneDryRun then
+        log("phone (dry): would type \"%s\" into the backpack search", text)
+        return false
+    end
+    pcall(function()
+        box:CaptureFocus()
+        task.wait(0.1)
+        box.Text = ""
+        task.wait(0.05)
+        box.Text = text
+        task.wait(0.25)
+        box:ReleaseFocus()
+    end)
+    log("phone: typed \"%s\" into the backpack search", text)
+    task.wait(0.9)
+    return true
+end
+
+-- search the backpack and click the first tile (the search narrows it to one)
+local function pickFromBackpack(pg, name, tag)
+    local root, box = backpackRoot(pg)
+    if not root then
+        if S.PhoneAutoLearn then learnDump("no_backpack_" .. tag, pg) end
+        return false, "the backpack did not open"
+    end
+    if not box then
+        if S.PhoneAutoLearn then learnDump("no_search_" .. tag, root) end
+        return false, "no search field in the backpack"
+    end
+    local grid = gridOf(root)
+    local before = #tilesOf(grid)
+    if not typeSearch(box, name) then return false, "dry run" end
+    local tiles = tilesOf(gridOf(root) or grid)
+    if #tiles == 0 then
+        log("phone: \"%s\" is not in the backpack", name)
+        if S.PhoneAutoLearn then learnDump("empty_" .. tag, root) end
+        return false, "no search results"
+    end
+    if #tiles > 4 and before > 0 and #tiles >= before - 1 then
+        log("phone: the search did not filter (%d -> %d tiles), not guessing", before, #tiles)
+        if S.PhoneAutoLearn then learnDump("nofilter_" .. tag, root) end
+        return false, "the search did not filter"
+    end
+    clickButton(tiles[1])
+    log("phone: picked \"%s\" from the backpack (%d result(s))", name, #tiles)
+    task.wait(1)
+    return true
+end
+
+-- the "Them" side may open the journal instead of the backpack
+local function pickFromJournal(pg, name, tag)
+    local petsTab = labelExact(pg, "pets")
+    if petsTab then
+        local btn = clickableForLabel(petsTab)
+        if btn and not S.PhoneDryRun then
+            clickButton(btn)
+            log("phone: opened the Pets tab of the journal")
+            task.wait(0.8)
+        end
+    end
+    local label = labelExact(pg, name)
+    if label then
+        local btn = clickableForLabel(label) or label.Parent
+        if btn then
+            if S.PhoneDryRun then
+                log("phone (dry): would pick \"%s\" in the journal", name)
+                return false, "dry run"
+            end
+            clickButton(btn)
+            log("phone: picked \"%s\" in the journal", name)
+            task.wait(1)
+            return true
+        end
+    end
+    for _ = 1, 4 do
+        if not invSweep(pg) then break end
+        task.wait(0.4)
+        label = labelExact(pg, name)
+        if label then
+            local btn = clickableForLabel(label) or label.Parent
+            if btn and not S.PhoneDryRun then
+                clickButton(btn)
+                log("phone: picked \"%s\" in the journal after scrolling", name)
+                task.wait(1)
+                return true
+            end
+        end
+    end
+    if S.PhoneAutoLearn then learnDump("journal_" .. tag, uiRoot(pg) or pg) end
+    return false, "\"" .. tostring(name) .. "\" is not in the journal"
+end
+
+-- Robo Todd himself, so the bot can post without the player walking up to him
+local function openRoboTodd()
+    local fire = G("fireproximityprompt")
+    for _, d in ipairs(workspace:GetDescendants()) do
+        if d:IsA("ProximityPrompt") then
+            local hay = ((d.ActionText or "") .. " " .. (d.ObjectText or "") .. " " .. d.Parent.Name):lower()
+            if hay:find("robo", 1, true) or hay:find("todd", 1, true) or hay:find("listing", 1, true) then
+                if type(fire) == "function" then
+                    local ok = pcall(fire, d)
+                    if ok then return true end
+                end
+                pcall(function()
+                    d:InputHoldBegin()
+                    task.wait(0.1)
+                    d:InputHoldEnd()
+                end)
+                return true
+            end
+        end
+    end
+    return false
+end
+
+-- the whole "POST A LISTING" flow; returns true only when the game confirmed it
+-- fills the You / Them slots on any two-sided screen (post listing, search)
+local function fillTwoSides(pg, giveName, wantName)
+    local you, them
+    for _ = 1, 12 do
+        you = labelExact(pg, "you")
+        them = labelExact(pg, "them")
+        if you and them then break end
+        task.wait(0.25)
+    end
+    if not (you and them) then
+        if S.PhoneAutoLearn then learnDump("no_sides", pg) end
+        return false, "the You / Them panels did not show up"
+    end
+
+    local top = math.min(you.AbsolutePosition.Y, them.AbsolutePosition.Y) - 12
+    local submit = clickLabel(pg, { "search", "post listing" }, true)
+    local bottom = (submit and submit.AbsolutePosition.Y) or (top + 460)
+
+    local plus = plusButtons(pg, top, bottom)
+    if #plus < 2 then
+        if S.PhoneAutoLearn then learnDump("no_plus", pg) end
+        return false, string.format("expected two + slots, found %d", #plus)
+    end
+    local leftPlus, rightPlus = plus[1], plus[#plus]
+
+    if not phoneClick(leftPlus, "put " .. giveName .. " on the You side") then return false, "dry run" end
+    task.wait(1.2)
+    local ok, why = pickFromBackpack(pg, giveName, "give")
+    if not ok then
+        log("phone: could not pick %s (%s)", giveName, tostring(why))
+        return false, why
+    end
+    task.wait(1)
+
+    if not (rightPlus and rightPlus.Parent and isVisible(rightPlus)) then
+        local again = plusButtons(pg, top, bottom)
+        rightPlus = again[#again]
+    end
+    if not rightPlus then
+        if S.PhoneAutoLearn then learnDump("no_want_slot", pg) end
+        return false, "no + slot for the Them side"
+    end
+    if not phoneClick(rightPlus, "put " .. wantName .. " on the Them side") then return false, "dry run" end
+    task.wait(1.2)
+
+    ok, why = pickFromBackpack(pg, wantName, "want")
+    if not ok then
+        log("phone: backpack did not have %s (%s), trying the journal", wantName, tostring(why))
+        ok, why = pickFromJournal(pg, wantName, "want")
+    end
+    if not ok then
+        log("phone: could not pick %s (%s)", wantName, tostring(why))
+        return false, why
+    end
+    task.wait(1)
+    return true
+end
+
+-- Robo Todd: POST A LISTING -> You / Them -> POST LISTING -> "Okay"
+local function postListingFlow(win, giveName, wantName)
+    local pg = getPlayerGui()
+    if not pg then return false, "no player GUI" end
+
+    local hub = clickLabel(pg, { "post a listing" })
+    if not hub then
+        log("phone: Robo Todd window is not open, trying his prompt")
+        if openRoboTodd() then
+            task.wait(1.5)
+            hub = clickLabel(pg, { "post a listing" })
+        end
+    end
+    if not hub then
+        if S.PhoneAutoLearn then learnDump("no_hub", uiRoot(win) or pg) end
+        return false, "no POST A LISTING button (use TRAVEL TO HUB first)"
+    end
+    if not phoneClick(hub, "open POST A LISTING") then return false, "dry run" end
+    task.wait(1.2)
+
+    local ok, why = fillTwoSides(pg, giveName, wantName)
+    if not ok then return false, why end
+
+    local post = clickLabel(pg, { "post listing" }, true)
+    if not post then
+        if S.PhoneAutoLearn then learnDump("no_post_btn", pg) end
+        return false, "no POST LISTING button"
+    end
+    if not phoneClick(post, "publish the listing") then return false, "dry run" end
+
+    -- wait for "Successfully posted listing!" and press Okay
+    local confirmed = false
+    for _ = 1, 16 do
+        task.wait(0.25)
+        if #visibleLabels(pg, { "successfully", "posted" }) > 0 then confirmed = true end
+        local okay = clickLabel(pg, { "okay" })
+        if okay and confirmed then
+            phoneClick(okay, "dismiss the success popup")
+            break
+        end
+    end
+    if not confirmed then
+        if S.PhoneAutoLearn then learnDump("no_confirm", pg) end
+        return false, "the game did not confirm the listing"
+    end
+    log("phone: posted %s for %s", giveName, wantName)
+    return true
+end
+
+-- phone app menu: TRADE LISTINGS / TRADE OFFERS / TRADE HISTORY / TRAVEL TO HUB
+local function phoneMenuOpen()
+    local pg = getPlayerGui()
+    if not pg then return nil end
+    if labelExact(pg, "trade listings") and labelExact(pg, "trade offers") then return pg end
+    if clickLabel(pg, { "travel to hub" }) then return pg end
+    return nil
+end
+
+local function openPhoneApp(words, headerWords, tag)
+    local pg = getPlayerGui()
+    if not pg then return false, "no player GUI" end
+    if #visibleLabels(pg, headerWords) > 0 then return true end
+    local tile = clickLabel(pg, words)
+    if not tile then
+        if S.PhoneAutoLearn then learnDump("no_app_" .. tag, uiRoot(pg) or pg) end
+        return false, "the phone has no " .. tostring(words[1]) .. " tile"
+    end
+    if not phoneClick(tile, "open " .. tostring(words[1])) then return false, "dry run" end
+    task.wait(1.2)
+    return true
+end
+
+local function travelToHub()
+    local pg = getPlayerGui()
+    if not pg then return false end
+    local tile = clickLabel(pg, { "travel to hub" })
+    if not tile then return false end
+    if not phoneClick(tile, "travel to the Trading Hub") then return false end
+    task.wait(4)
+    return true
+end
+
+-- the search flow: phone -> TRADE LISTINGS -> SEARCH LISTINGS -> You/Them -> SEARCH
+-- -> a listing row with SEND OFFER. The counterpart fixes the terms, so the value
+-- is exactly the planned one: we only send offers that are already profitable.
+local function searchAndOffer(giveName, wantName)
+    local pg = getPlayerGui()
+    if not pg then return false, "no player GUI" end
+
+    local open, why = openPhoneApp({ "trade listings" }, { "search listings", "offers i sent" }, "listings")
+    if not open then return false, why end
+    task.wait(0.8)
+
+    local ok, why2 = openPhoneApp({ "search listings" }, { "you", "them" }, "search")
+    if not ok then return false, why2 end
+    task.wait(0.8)
+
+    local filled, why3 = fillTwoSides(pg, giveName, wantName)
+    if not filled then return false, why3 end
+
+    local searchBtn = clickLabel(pg, { "search" }, true)
+    if not searchBtn then
+        if S.PhoneAutoLearn then learnDump("no_search_btn", pg) end
+        return false, "no SEARCH button"
+    end
+    if not phoneClick(searchBtn, "look for matching listings") then return false, "dry run" end
+    task.wait(2)
+
+    -- results: rows "Listing #1", "Listing #2", plus a SEND OFFER button
+    local rows = {}
+    for _, d in ipairs(pg:GetDescendants()) do
+        if d:IsA("TextLabel") and isVisible(d) and d.Text ~= ""
+            and d.Text:lower():find("listing", 1, true) then
+            local p, depth = d, 0
+            while p and p ~= pg and depth < 7 do
+                if p:IsA("GuiObject") and p.AbsoluteSize.Y > 90 then
+                    local btn = clickLabel(p, { "send offer" })
+                    if btn then
+                        rows[#rows + 1] = { label = d.Text, card = p, send = btn }
+                        break
+                    end
+                end
+                p = p.Parent
+                depth += 1
+            end
+        end
+    end
+    if #rows == 0 then
+        log("phone: no listing matches %s -> %s right now", giveName, wantName)
+        if S.PhoneAutoLearn then learnDump("no_results", pg) end
+        return false, "no matching listing"
+    end
+    table.sort(rows, function(a, b) return a.card.AbsolutePosition.Y < b.card.AbsolutePosition.Y end)
+    local row = rows[1]
+    log("phone: %d listing(s) match, sending an offer on \"%s\"", #rows, tostring(row.label))
+    if not phoneClick(row.send, string.format("send the offer: %s for %s", giveName, wantName)) then
+        return false, "dry run"
+    end
+    task.wait(1.5)
+    local okay = clickLabel(pg, { "okay", "ok", "confirm" })
+    if okay then
+        phoneClick(okay, "dismiss the offer popup")
+        task.wait(0.4)
+    end
+    log("phone: offer sent (%s for %s)", giveName, wantName)
+    return true
+end
+
+-- what to give away: cheap and duplicated first, so the upgrade is safe
+
 -- what to give away: cheap and duplicated first, so the upgrade is safe
 local function pickGiveItem(items, keep, pool)
     local hasPool = next(pool) ~= nil
@@ -4205,17 +4769,14 @@ local function createPhoneListing(win)
         return false
     end
 
-    local createBtn = findLearnedBtn(win, "PhoneCreatePath", PHONE_CREATE, PHONE_REMOVE)
-    if not createBtn then
-        log("phone: no create/post button here (posting works only in the Trading Hub)")
-        if S.PhoneAutoLearn then learnDump("no_create", uiRoot(win)) end
+    local hubBtn = clickLabel(getPlayerGui() or win, { "post a listing" })
+    if not hubBtn then
+        log("phone: Robo Todd is not open right now (posting works only in the Trading Hub)")
+        if S.PhoneAutoLearn then learnDump("no_hub_menu", uiRoot(win)) end
         return false
     end
 
-    phoneClick(createBtn, "open the listing screen")
-    task.wait(0.8)
-
-    local root = uiRoot(createBtn)
+    local root = uiRoot(win)
     local keep = parseList(S.KeepListText)
     local pool = parseList(S.TradePoolText)
 
@@ -4255,57 +4816,33 @@ local function createPhoneListing(win)
             giveName, giveValue, giveCopies, wantName, wantValue, gainPct, tostring(wantSource))
     end
 
-    local giveSlot = selectItemInPicker(root, giveName)
-    if not giveSlot then
-        log("phone: %s is not in the give picker", giveName)
-        return false
+    if giveValue and wantValue and giveValue > 0 then
+        gainPct = (wantValue / giveValue - 1) * 100
     end
-    phoneClick(giveSlot, "pick " .. giveName)
-    task.wait(0.6)
 
-    local nextBtn = findLearnedBtn(root, "PhoneNextPath", PHONE_NEXT, PHONE_REMOVE)
-    if not nextBtn then
-        log("phone: no next/confirm after picking the item")
-        if S.PhoneAutoLearn then learnDump("no_next", root) end
+    local okFlow, flowWhy = postListingFlow(win, giveName, wantName)
+    if not okFlow then
+        log("phone: listing flow stopped: %s", tostring(flowWhy))
         return false
     end
-    phoneClick(nextBtn, "confirm the offered item")
-    task.wait(0.8)
-
-    local wantSlot = selectWantItem(root, wantName)
-    if not wantSlot then
-        log("phone: %s is not in the want picker (send phone_dump.txt from this screen)", wantName)
-        return false
-    end
-    phoneClick(wantSlot, "pick the wanted item " .. wantName)
-    task.wait(0.5)
-
-    local post = findLearnedBtn(root, "PhonePostPath", { "post", "publish", "list", "confirm" }, PHONE_REMOVE)
-    if not post then
-        log("phone: no post button on the last screen")
-        if S.PhoneAutoLearn then learnDump("no_post", root) end
-        return false
-    end
-    if not phoneClick(post, string.format("post %s for %s", give.name, wantName)) then return false end
-    task.wait(1)
 
     E.phone.bucks = (E.phone.bucks or 0) + 100
     E.phone.listings[#E.phone.listings + 1] = {
-        item = give.name,
-        value = give.value,
+        item = giveName,
+        value = giveValue,
         want = wantName,
         askV = wantValue,
         at = os.time(),
     }
     sendPhoneWebhook("Listing posted", 0x3498DB, {
-        { name = "I offer", value = string.format("%s (%.3f)", give.name, give.value), inline = true },
-        { name = "I want", value = string.format("%s (%.3f)", wantName, wantValue), inline = true },
-        { name = "If it sells", value = string.format("+%.0f%% | bucks spent: %d", gainPct, E.phone.bucks or 0), inline = false },
+        { name = "I offer", value = string.format("%s (%.3f)", tostring(giveName), giveValue or 0), inline = true },
+        { name = "I want", value = string.format("%s (%.3f)", tostring(wantName), wantValue or 0), inline = true },
+        { name = "If it sells", value = string.format("+%.0f%% | bucks spent: %d", gainPct or 0, E.phone.bucks or 0), inline = false },
     }, "listing", {
         slot = "ask",
-        items = give.name,
+        items = tostring(giveName),
         n = 1,
-        ask = wantName,
+        ask = tostring(wantName),
         askV = wantValue,
         askPct = gainPct,
     })
@@ -4473,8 +5010,46 @@ local function stepPhone()
         end
     end
 
-    -- 4. post a new listing when a slot is free
-    createPhoneListing(win)
+    -- 4. look for profitable listings on the phone and send an offer
+    if S.PhoneAutoOffer and os.clock() >= (E.phone.offerAt or 0) then
+        E.phone.offerAt = os.clock() + math.max(30, tonumber(S.PhoneOfferEvery) or 90)
+        local inv = inventorySnapshot()
+        local plan = inv and planUpgrades(inv.items, 1) or nil
+        if plan and plan[1] then
+            local step = plan[1]
+            local ok, why = searchAndOffer(step.give, step.want)
+            if ok then
+                sendPhoneWebhook("Offer sent", 0x1ABC9C, {
+                    { name = "I offer", value = string.format("%s (%.3f)", step.give, step.giveValue), inline = true },
+                    { name = "I want", value = string.format("%s (%.3f)", step.want, step.wantValue), inline = true },
+                    { name = "Gain", value = string.format("+%.0f%% (%+.3f)", step.pct, step.gain), inline = false },
+                }, "listing", {
+                    slot = "ask",
+                    items = step.give,
+                    n = 1,
+                    ask = step.want,
+                    askV = step.wantValue,
+                    askPct = step.pct,
+                })
+            else
+                log("phone: search & offer skipped (%s)", tostring(why))
+            end
+        else
+            log("phone: no upgrade plan yet (open the backpack and press Scan inventory)")
+        end
+    end
+
+    -- 5. post a new listing when a slot is free
+    if S.PhoneAutoList then
+        local pg = getPlayerGui()
+        local hubOpen = pg and clickLabel(pg, { "post a listing" })
+        if not hubOpen and S.PhoneAutoTravel and os.clock() >= (E.phone.travelAt or 0) then
+            E.phone.travelAt = os.clock() + 90
+            log("phone: travelling to the Trading Hub to post")
+            travelToHub()
+        end
+        createPhoneListing(win)
+    end
 end
 
 -- structured report for the log and for phone_dump.txt
@@ -5094,6 +5669,9 @@ local function buildUI()
     toggle("PhoneAutoList", "Post listings (100 bucks each)")
     toggle("PhoneScanInventory", "Read my inventory before posting")
     toggle("PhoneAutoLearn", "Auto-dump the phone UI (self-learning)")
+    toggle("PhoneAutoOffer", "Search listings and send offers")
+    input("PhoneOfferEvery", "Search listings every N seconds", true)
+    toggle("PhoneAutoTravel", "Travel to the Hub myself")
     input("PhoneInvMaxAge", "Rescan inventory after N seconds", true)
     input("PhoneInvPasses", "Inventory scan passes (scroll pages)", true)
     input("PhoneUpgradeSteps", "Upgrade chain depth", true)
@@ -5170,6 +5748,21 @@ local function buildUI()
             local plan = planNextListing()
             log("upgrade chain: %s", plan)
             notify("Upgrade chain", plan:sub(1, 120), 8)
+        end)
+    end)
+
+    button("Search & offer now", function()
+        task.spawn(function()
+            local inv = inventorySnapshot()
+            if not inv then scanInventoryNow() end
+            local plan = planUpgrades(E.inv.items, 1)
+            if not plan[1] then
+                notify("Offer", "no upgrade plan (check duplicates only / min value)", 6)
+                return
+            end
+            local step = plan[1]
+            local ok, why = searchAndOffer(step.give, step.want)
+            notify("Offer", ok and string.format("sent: %s -> %s", step.give, step.want) or tostring(why), 6)
         end)
     end)
 
@@ -5365,6 +5958,8 @@ local ok, err = pcall(function()
     BOT.inventory = E.inv
     BOT.dumpRemotes = dumpRemotes
     BOT.learnDump = learnDump
+    BOT.searchAndOffer = searchAndOffer
+    BOT.travelToHub = travelToHub
     BOT.phone = E.phone
     BOT.api = {
         getSettings = function() return S end,
