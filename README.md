@@ -22,7 +22,7 @@ AFK-бот для трейдов в **Adopt Me** (Roblox). Написан в т�
 (для сохранения настроек).
 
 ```lua
-loadstring(game:HttpGet("https://raw.githubusercontent.com/azeroygit/s/main/AdoptMeTradeBot.lua"))()
+loadstring(game:HttpGet("https://raw.githubusercontent.com/azeroygit/123/main/AdoptMeTradeBot.lua"))()
 ```
 
 или открой `loader.lua`, впиши свой URL и запусти его.
@@ -36,6 +36,9 @@ AdoptMeTradeBot/
 ├── log.txt           # последние 60 строк лога
 ├── gui_dump.txt      # дерево GUI (после "Dump GUI tree to file")
 ├── phone_dump.txt    # отчёт по окну Trade Phone (после "Scan trade phone")
+├── inventory_dump.txt # инвентарь + план апгрейдов (после "Scan inventory")
+├── clicks.txt        # твои клики по игровому UI (после "Record my clicks")
+├── remotes.txt       # RemoteEvent/RemoteFunction из ReplicatedStorage
 └── start_error.txt   # ошибка запуска, если что-то упало
 ```
 
@@ -105,7 +108,7 @@ AdoptMeTradeBot/
 | Их фича | У нас | Почему |
 |---|---|---|
 | Trade Phone (создание листингов прямо из окна) | бета | `PhoneEnabled` + `Dry run`; окно читается, выставление листинга ждёт `phone_dump.txt` с экрана Робо Тодда |
-| ask-листинги («даю X, хочу Y») и их авто-трейд | бета | наценка `Ask price: % above value`; сам трейд по ask-листингу делает игра |
+| ask-листинги («даю X, хочу Y») и их авто-трейд | бета | апгрейд-стратегия: дешёвый дубликат → пет дороже на `Min/Max gain %`, бюджет bucks, авто-снятие по таймеру |
 | своп офферов, когда лимит | есть | `Max waiting offers` + `Drop the weakest offer` |
 | авто-запросы трейда по списку ников | есть (`AutoRequestTrades`), но по UI-эвристике |
 | фильтр плохих офферов | есть | `MinAcceptRatio` / `MaxAcceptRatio` / `RequireKnownValue` |
@@ -164,7 +167,30 @@ value = базовая_цена_amvgg × fly × ride × neon × mega
 * принимать оффер, если он не ниже порога, и отклонять слабые;
 * сбрасывать самый слабый оффер, если их больше `Max waiting offers`;
 * снимать листинг, который висит дольше `Take a listing down after N min`;
-* пытаться выставить новый листинг с наценкой `Ask price: % above value`.
+* выставлять **ask-листинг на апгрейд**: отдаёт самый дешёвый дубликат и просит
+  пета дороже на `Min gain % .. Max gain %` — то есть инвентарь растёт в ценах
+  amvgg, а не просто «висит» (игра сама завершает сделку, когда кто-то приносит
+  ровно то, что ты попросил).
+
+Как бот выбирает пару:
+
+1. **Что отдаю** — только то, что реально видно в пикере (значит, оно у тебя есть),
+   по умолчанию только дубликаты (`Only list pets I own 2+ of`), сначала самые
+   дешёвые, не из `Never give`, не дешевле `Never list anything cheaper than`.
+2. **Что прошу** — сначала из `Wanted items`, если цена попадает в окно
+   `+Min gain % .. +Max gain %`; иначе самый дорогой пет из таблицы в этом окне.
+   Окно специально небольшое: игра блокирует слишком наглые листинги
+   («сэндвич за Shadow Dragon»).
+3. **Бюджет** — `Bucks budget per session`: каждый листинг стоит 100 bucks, после
+   лимита бот перестаёт выставлять (ползунок `0` = без лимита).
+
+Что бот напишет в лог перед публикацией:
+
+```
+phone: plan Dog (0.08, 2 copies) -> Bandicoot (0.11, +38%, from value table)
+```
+
+Кнопка **Plan next listing** показывает эту пару, ничего не нажимая.
 
 **Сначала включи `Dry run`** (он включён по умолчанию). В логе будет видно, что бот
 нашёл и что он *собирался* нажать — ничего не нажимая:
@@ -186,9 +212,32 @@ phone: no create/post button here (posting works only in the Trading Hub)
 
 **Кнопки в Tools**
 
+* `Scan inventory` — прочитать настоящий инвентарь (сетка + все страницы скролла),
+  записать `AdoptMeTradeBot/inventory_dump.txt` и карточку в Discord;
+* `Plan upgrade chain` — показать цепочку апгрейдов: что отдаём → что просим →
+  что отдаём из полученного. Ничего не нажимает;
 * `Scan trade phone` — отчёт по открытому окну (кнопки, карточки, суммы) в лог и
   в `AdoptMeTradeBot/phone_dump.txt`;
-* `Open trade phone` — нажать игрушку за тебя.
+* `Open trade phone` — нажать игрушку за тебя;
+* `Dump remotes to file` — все RemoteEvent/RemoteFunction из ReplicatedStorage;
+* `Dump GUI tree to file` — дерево текущего экрана.
+
+**Инвентарь как источник плана**
+
+Перед публикацией бот сканирует инвентарь сам (`Read my inventory before posting`,
+пересканирует раз в `Rescan inventory after N seconds`). Скан идёт по всем страницам
+сетки, поэтому видит петов, которых нет на первом экране. Окно Trade Phone и чужое
+окно трейда при скане игнорируются — там чужие предметы, а не твои.
+
+Дальше строится цепочка: самый дешёвый дубликат → пет дороже на `Min..Max gain %`
+→ и полученный пет становится следующим «что отдаю». Вывод в лог:
+
+```
+upgrade chain:
+1) Dog (0.08) -> Bandicoot (0.11) +38% [value table]
+2) Bandicoot (0.11) -> Frog (0.15) +36% [value table]
+chain: 3.140 -> 3.240 (+0.100)
+```
 
 Если авто-выставление листинга не идёт дальше выбора предмета — пришли
 `phone_dump.txt` с экрана Робо Тодда: шаги «что хочу взамен» и «опубликовать»

@@ -187,8 +187,20 @@ local DEFAULT_SETTINGS = {
     PhoneAutoList       = false,   -- posting costs 100 bucks each
     PhoneMinOfferValue  = 0,       -- absolute floor for an offer on a listing
     PhoneListedValue    = 0,       -- value of a listing posted by hand
-    PhoneAskPct         = 30,      -- ask this much above the value
+    PhoneUpgradeMinPct  = 10,      -- smallest gain an ask listing should bring
+    PhoneUpgradeMaxPct  = 60,      -- stay under the game's fairness guardrails
+    PhoneBucksMax       = 300,     -- stop posting after this many bucks per session
+    PhoneDuplicatesOnly = true,    -- only list pets you own two or more of
+    PhoneGiveMinValue   = 0.05,    -- never list cheaper items than this
+    PhoneScanInventory  = true,    -- read the real inventory before posting
+    PhoneInvMaxAge      = 300,     -- rescan the inventory after this many seconds
+    PhoneInvPasses      = 6,       -- how many scroll passes a full scan may take
+    PhoneUpgradeSteps   = 4,       -- how deep the upgrade chain may go
     PhoneMaxListings    = 2,
+    PhoneAutoLearn      = true,    -- dump the phone face and remember real button paths
+    PhoneCreatePath     = "",
+    PhoneNextPath       = "",
+    PhonePostPath       = "",
     PhoneMaxOffers      = 20,
     PhoneRefreshMin     = 20,
     PhoneLoopDelay      = 1.5,
@@ -197,6 +209,7 @@ local DEFAULT_SETTINGS = {
     OurSideIsLeft = true,       -- flip if the bot reads your offer as theirs
     Delay         = 0.45,
     Debug         = false,
+    ClickRecorder = false,      -- log every click you make (for mapping the real UI)
     ToggleKey     = "RightControl",
 
     -- lists (newline separated)
@@ -259,7 +272,8 @@ local E = {
     requestIndex = 0,
     stats = { accepted = 0, declined = 0, offers = 0, giveV = 0, getV = 0 },
     lastPostAt = os.time(),
-    phone = { listings = {}, cards = 0, nextAt = 0, openAt = 0, createAt = 0 },
+    phone = { listings = {}, cards = 0, nextAt = 0, openAt = 0, createAt = 0, bucks = 0, learnAt = 0 },
+    inv = { items = {}, at = 0, total = 0, count = 0, busy = false },
 }
 
 --============================================================== 4b. values
@@ -2297,9 +2311,26 @@ end
 local ACCEPT_WORDS  = { "accept", "confirm", "ready", "yes" }
 local DECLINE_WORDS = { "decline", "cancel", "refuse", "no thanks" }
 
+-- ImageButton has no Text property at all and indexing it raises an error, while
+-- the game uses ImageButtons for most of the HUD. Every read goes through these.
+local function guiText(obj)
+    if not obj then return "" end
+    local ok, t = pcall(function() return obj.Text end)
+    if ok and type(t) == "string" then return t end
+    return ""
+end
+
+local function guiLabel(obj)
+    local text = guiText(obj)
+    if text ~= "" then return text end
+    local ok, n = pcall(function() return obj.Name end)
+    if ok and n ~= nil then return tostring(n) end
+    return "?"
+end
+
 -- buttons in game UIs are not always labelled with Text, so fall back to Name
 local function buttonMatches(btn, words)
-    return textMatches(btn.Text, words) or textMatches(btn.Name, words)
+    return textMatches(guiText(btn), words) or textMatches(btn.Name, words)
 end
 
 local lastClickAt = {}
@@ -3298,7 +3329,7 @@ local function tryRequestTrade(target)
         if not node then break end
         for _, d in ipairs(node:GetDescendants()) do
             if d:IsA("GuiButton") and isVisible(d) then
-                local t = ((d.Text or "") .. " " .. (d.Name or "")):lower()
+                local t = (guiText(d) .. " " .. (d.Name or "")):lower()
                 if t:find("trade", 1, true) and not t:find("request", 1, true) then
                     clickButton(d)
                     return true
@@ -3413,7 +3444,7 @@ local function phoneClick(btn, what)
         log("phone: %s - no button found", tostring(what))
         return false
     end
-    local label = tostring(btn.Text ~= "" and btn.Text or btn.Name)
+    local label = guiLabel(btn)
     if S.PhoneDryRun then
         log("phone (dry): would click \"%s\" for %s", label, tostring(what))
         return false
@@ -3429,7 +3460,7 @@ local function phoneClickToy()
     local function scan()
         for _, d in ipairs(pg:GetDescendants()) do
             if d:IsA("GuiButton") and isVisible(d) then
-                local t = (tostring(d.Text or "") .. " " .. tostring(d.Name or "")):lower()
+                local t = (guiText(d) .. " " .. tostring(d.Name or "")):lower()
                 if t:find("phone", 1, true) then return d end
             end
         end
@@ -3446,7 +3477,7 @@ local function phoneClickToy()
     end
     if not btn then return false end
     if S.PhoneDryRun then
-        log("phone (dry): would click the phone toy \"%s\"", tostring(btn.Text ~= "" and btn.Text or btn.Name))
+        log("phone (dry): would click the phone toy \"%s\"", guiLabel(btn))
         return false
     end
     clickButton(btn)
@@ -3531,7 +3562,7 @@ local function phoneFloor()
     local listed = tonumber(S.PhoneListedValue) or 0
     if listed > 0 then floor = math.max(floor, listed * minRatio) end
     for _, rec in ipairs(E.phone.listings or {}) do
-        local v = (tonumber(rec.value) or 0) * minRatio
+        local v = tonumber(rec.askV) or ((tonumber(rec.value) or 0) * minRatio)
         if v > floor then floor = v end
     end
     return floor
@@ -3563,29 +3594,579 @@ local function sendPhoneWebhook(title, color, fields, kiriaEvent, kiriaCtx)
     return true
 end
 
--- best allowed, priced item that is currently visible (so it exists)
-local function pickVisibleListingItem(root)
+--============================================================== 9d. inventory brain
+-- Reads the real inventory (backpack grid, every scroll page), then plans an
+-- upgrade chain out of it: give the cheapest duplicate, ask for something worth
+-- more, and feed the result of each step into the next one. Everything is based
+-- on items that were actually seen, so a plan can never name a pet you do not own.
+local function invBanned(d, banned)
+    local p = d
+    local guard = 0
+    while p and guard < 40 do
+        if banned[p] then return true end
+        p = p.Parent
+        guard += 1
+    end
+    return false
+end
+
+-- the phone lists other people's offers and the trade window lists the other
+-- player's pets; neither of those is mine
+local function invBannedRoots()
+    local banned = {}
+    local phoneWin = findPhoneWindow()
+    if phoneWin then banned[phoneWin] = true end
+    local tradeWin = findTradeWindow()
+    if tradeWin then banned[tradeWin] = true end
+    -- my own window prints item names in the log, they are not inventory
+    local pg = getPlayerGui()
+    local ownGui = pg and pg:FindFirstChild("AdoptMeTradeBotUI")
+    if ownGui then banned[ownGui] = true end
+    return banned
+end
+
+-- one pass over whatever is on screen right now
+local function invPass(root, banned)
+    local map, order, seen = {}, {}, {}
+    for _, d in ipairs(root:GetDescendants()) do
+        if d:IsA("TextLabel") and isVisible(d) and d.Text ~= "" and not invBanned(d, banned) then
+            local name = cleanItemName(d.Text)
+            if name ~= "" and not textMatches(name, PHONE_NOISE) then
+                local entry = lookupValue(name)
+                if entry then
+                    local slot = findSlot(d, root) or d
+                    local key = normalize(entry.name)
+                    local rec = map[key]
+                    if not rec then
+                        local flags = readFlags(slot)
+                        rec = {
+                            key = key, name = entry.name, entry = entry,
+                            flags = flags, value = itemValue(entry, flags),
+                            copies = 0, slots = {},
+                        }
+                        map[key] = rec
+                        order[#order + 1] = rec
+                    end
+                    if not seen[slot] then
+                        seen[slot] = true
+                        rec.copies += 1
+                        rec.slots[#rec.slots + 1] = slot
+                    end
+                end
+            end
+        end
+    end
+    return order
+end
+
+-- scroll every grid on the screen by one page; false when nothing moved
+local function invSweep(root)
+    local moved = false
+    for _, d in ipairs(root:GetDescendants()) do
+        if d:IsA("ScrollingFrame") and isVisible(d) then
+            pcall(function()
+                local window = d.AbsoluteWindowSize
+                if window.Y <= 0 then window = d.AbsoluteSize end
+                local canvas = d.AbsoluteCanvasSize
+                local maxY = math.max(0, canvas.Y - window.Y)
+                if maxY >= 1 then
+                    local step = math.max(window.Y * 0.8, 60)
+                    local y = d.CanvasPosition.Y + step
+                    if y > maxY + 1 then
+                        y = 0
+                    else
+                        moved = true
+                    end
+                    d.CanvasPosition = Vector2.new(d.CanvasPosition.X, y)
+                end
+            end)
+        end
+    end
+    return moved
+end
+
+-- toys (the phone itself, strollers, ...) live in the Roblox backpack
+local function invTools(best, order)
+    local bp = LocalPlayer:FindFirstChild("Backpack")
+    if not bp then return end
+    for _, t in ipairs(bp:GetChildren()) do
+        if t:IsA("Tool") then
+            local entry = lookupValue(cleanItemName(t.Name))
+            if entry then
+                local key = normalize(entry.name)
+                local rec = best[key]
+                if not rec then
+                    rec = { key = key, name = entry.name, entry = entry, value = itemValue(entry, nil), copies = 0 }
+                    best[key] = rec
+                    order[#order + 1] = rec
+                end
+                rec.copies += 1
+            end
+        end
+    end
+end
+
+local function inventoryTotal(items)
+    local total, count = 0, 0
+    for _, it in ipairs(items or {}) do
+        total += (it.value or 0) * (it.copies or 1)
+        count += it.copies or 1
+    end
+    return total, count
+end
+
+-- full scan: several scroll passes, keep the highest copy count ever seen
+local function scanInventoryBrain(maxPasses)
+    local pg = getPlayerGui()
+    if not pg then return false, "no player GUI" end
+    maxPasses = tonumber(maxPasses) or tonumber(S.PhoneInvPasses) or 6
+    local banned = invBannedRoots()
+    local best, order = {}, {}
+    local openedBag = false
+
+    for pass = 1, maxPasses do
+        local found = invPass(pg, banned)
+        if #found == 0 and not openedBag then
+            openedBag = true
+            local bag = findButtonIn(pg, { "backpack", "inventory", "pets" })
+            if bag and not S.PhoneDryRun then
+                clickButton(bag)
+                task.wait(0.7)
+                found = invPass(pg, banned)
+            end
+        end
+        for _, rec in ipairs(found) do
+            local cur = best[rec.key]
+            if not cur then
+                cur = {
+                    key = rec.key, name = rec.name, entry = rec.entry,
+                    value = rec.value, flags = rec.flags, copies = rec.copies,
+                }
+                best[rec.key] = cur
+                order[#order + 1] = cur
+            elseif rec.copies > cur.copies then
+                cur.copies = rec.copies
+                cur.value = rec.value
+                cur.flags = rec.flags
+            end
+        end
+        if #found == 0 or not invSweep(pg) then break end
+        task.wait(0.25)
+    end
+
+    invTools(best, order)
+    table.sort(order, function(a, b)
+        local av = (a.value or 0) * (a.copies or 1)
+        local bv = (b.value or 0) * (b.copies or 1)
+        if av == bv then return a.name < b.name end
+        return av > bv
+    end)
+
+    E.inv.items = order
+    E.inv.total, E.inv.count = inventoryTotal(order)
+    E.inv.at = os.time()
+    E.inv.busy = false
+    return true, nil
+end
+
+local function inventorySnapshot()
+    local inv = E.inv
+    if not inv or not inv.items or #inv.items == 0 then return nil end
+    return inv
+end
+
+-- hand back the last snapshot and start a fresh one in the background when it
+-- is too old; never blocks the trade loop
+local function ensureInventory()
+    if S.PhoneScanInventory == false then return inventorySnapshot() end
+    local inv = inventorySnapshot()
+    local maxAge = tonumber(S.PhoneInvMaxAge) or 300
+    if inv and (os.time() - (inv.at or 0)) <= maxAge then return inv end
+    if E.inv.busy then return inv end
+    E.inv.busy = true
+    task.spawn(function()
+        local ok, err = scanInventoryBrain()
+        if ok then
+            log("inventory: %d stacks, %d items, total %.3f", #E.inv.items, E.inv.count or 0, E.inv.total or 0)
+        else
+            E.inv.busy = false
+            log("inventory: scan failed (%s)", tostring(err))
+        end
+    end)
+    return inv
+end
+
+-- one greedy chain: cheapest duplicate -> best item inside the gain window,
+-- then the item you just got becomes the next thing you give away
+local function planUpgrades(items, steps)
+    steps = tonumber(steps) or tonumber(S.PhoneUpgradeSteps) or 4
     local keep = parseList(S.KeepListText)
     local pool = parseList(S.TradePoolText)
+    local wanted = parseList(S.WantedText)
     local hasPool = next(pool) ~= nil
-    local best, bestValue = nil, 0
+    local minPct = tonumber(S.PhoneUpgradeMinPct) or 10
+    local maxPct = tonumber(S.PhoneUpgradeMaxPct) or 60
+    local giveFloor = tonumber(S.PhoneGiveMinValue) or 0.05
+
+    local owned = {}
+    for _, it in ipairs(items or {}) do
+        owned[it.key] = { key = it.key, name = it.name, value = it.value or 0, copies = it.copies or 1 }
+    end
+
+    local plan = {}
+    local startTotal = inventoryTotal(items)
+    local total = startTotal
+
+    for _ = 1, steps do
+        local give
+        for _, rec in pairs(owned) do
+            local allowed = not keep[rec.key] and (not hasPool or pool[rec.key] ~= nil)
+            if allowed and rec.value >= giveFloor then
+                local enough = (rec.copies >= 2) or (S.PhoneDuplicatesOnly == false)
+                if enough and (not give or rec.value < give.value) then give = rec end
+            end
+        end
+        if not give then break end
+
+        local lo = give.value * (1 + minPct / 100)
+        local hi = give.value * (1 + maxPct / 100)
+        local want, wantValue, source, bestScore
+        for key, entry in pairs(VALUES) do
+            local v = entry.value or 0
+            if key ~= give.key and v >= lo and v <= hi and not keep[key] then
+                local score = v
+                if wanted[key] then score += 10000 end
+                local mine = owned[key]
+                if mine and (mine.copies or 0) > 0 then score -= 5000 end
+                if entry.cat == "pet" then score += 300 end
+                if not bestScore or score > bestScore then
+                    want, wantValue, bestScore = entry.name, v, score
+                    if wanted[key] then
+                        source = "wanted list"
+                    elseif mine and (mine.copies or 0) > 0 then
+                        source = "already owned, another copy"
+                    else
+                        source = "value table"
+                    end
+                end
+            end
+        end
+        if not want then break end
+
+        local key = normalize(want)
+        local rec = owned[key]
+        if not rec then
+            rec = { key = key, name = want, value = wantValue, copies = 0 }
+            owned[key] = rec
+        end
+        rec.copies += 1
+        if (rec.value or 0) < wantValue then rec.value = wantValue end
+
+        give.copies -= 1
+        if give.copies <= 0 then owned[give.key] = nil end
+
+        local gain = wantValue - give.value
+        total += gain
+        plan[#plan + 1] = {
+            give = give.name, giveValue = give.value,
+            want = want, wantValue = wantValue,
+            gain = gain, pct = (gain / give.value) * 100,
+            source = source or "value table",
+        }
+    end
+
+    local planned = 0
+    for _, s in ipairs(plan) do planned += s.gain end
+    return plan, startTotal, planned
+end
+
+local function describePlan(plan, startTotal, planned)
+    if not plan or #plan == 0 then return "no safe upgrade found" end
+    local lines = {}
+    for i, s in ipairs(plan) do
+        lines[#lines + 1] = string.format("%d) %s (%.3f) -> %s (%.3f) %+.0f%% [%s]",
+            i, s.give, s.giveValue, s.want, s.wantValue, s.pct, s.source)
+    end
+    lines[#lines + 1] = string.format("chain: %.3f -> %.3f (%+.3f)", startTotal, startTotal + planned, planned)
+    return table.concat(lines, "\n")
+end
+
+local function writeInventoryDump()
+    local inv = E.inv or {}
+    local items = inv.items or {}
+    local lines = { "Inventory scan " .. os.date("%Y-%m-%d %H:%M:%S") }
+    lines[#lines + 1] = string.format("stacks: %d | items: %d | value: %.3f", #items, inv.count or 0, inv.total or 0)
+    for _, it in ipairs(items) do
+        lines[#lines + 1] = string.format("  %s x%d | %.3f each | %.3f total%s",
+            it.name, it.copies or 1, it.value or 0, (it.value or 0) * (it.copies or 1),
+            (it.flags and flagString(it.flags) ~= "") and (" | " .. flagString(it.flags)) or "")
+    end
+    if #items == 0 then
+        lines[#lines + 1] = "  nothing found: open the backpack (or a trade) and scan again"
+    end
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = "upgrade plan:"
+    local plan, startTotal, planned = planUpgrades(items)
+    lines[#lines + 1] = describePlan(plan, startTotal, planned)
+    local body = table.concat(lines, "\n")
+    if writefile then pcall(writefile, BOT.Folder .. "/inventory_dump.txt", body) end
+    return body
+end
+
+local function sendInventoryCard()
+    local inv = inventorySnapshot()
+    if not inv then return false end
+    local plan, startTotal, planned = planUpgrades(inv.items)
+    local top = {}
+    for i = 1, math.min(5, #inv.items) do
+        local it = inv.items[i]
+        top[#top + 1] = string.format("%s x%d (%.3f)", it.name, it.copies or 1,
+            (it.value or 0) * (it.copies or 1))
+    end
+    return sendPhoneWebhook("Inventory scan", 0x9B59B6, {
+        { name = "Inventory", value = string.format("%d stacks / %d items / **%.3f** total",
+            #inv.items, inv.count or 0, inv.total or 0), inline = false },
+        { name = "Most valuable", value = #top > 0 and table.concat(top, "\n") or "-", inline = false },
+        { name = "Upgrade chain", value = describePlan(plan, startTotal, planned), inline = false },
+    })
+end
+
+-- the pickers (give / want) share one search field
+local function pickerSearch(root, text)
+    local box
+    for _, d in ipairs(root:GetDescendants()) do
+        if d:IsA("TextBox") and isVisible(d) then box = d; break end
+    end
+    if not box then return false end
+    if S.PhoneDryRun then
+        log("phone (dry): would type \"%s\" into the search field", text)
+        return true
+    end
+    pcall(function()
+        box.Text = text
+        box:CaptureFocus()
+        task.wait(0.15)
+        box:ReleaseFocus()
+    end)
+    log("phone: searched the picker for %s", text)
+    task.wait(0.7)
+    return true
+end
+
+local function clickPickerItem(root, name)
+    local key = normalize(name or "")
+    if key == "" then return nil end
+    for _, d in ipairs(root:GetDescendants()) do
+        if d:IsA("TextLabel") and isVisible(d) and d.Text ~= "" then
+            local entry = lookupValue(cleanItemName(d.Text))
+            if entry and normalize(entry.name) == key then
+                return findSlot(d, root) or d.Parent
+            end
+        end
+    end
+    return nil
+end
+
+local function selectItemInPicker(root, name)
+    local slot = clickPickerItem(root, name)
+    if slot then return slot end
+    if pickerSearch(root, name) then return clickPickerItem(root, name) end
+    return nil
+end
+
+-- every priced item that is visible right now (the picker only shows what we own)
+local function visibleItems(root)
+    local map, order = {}, {}
     for _, d in ipairs(root:GetDescendants()) do
         if d:IsA("TextLabel") and isVisible(d) and d.Text ~= "" then
             local name = cleanItemName(d.Text)
             if name ~= "" and not phoneNoise(name) then
                 local entry = lookupValue(name)
                 if entry then
-                    local key = normalize(entry.name)
-                    if not keep[key] and (not hasPool or pool[key] ~= nil) then
-                        local flags = readFlags(findSlot(d, root) or d)
-                        local v = itemValue(entry, flags)
-                        if v > bestValue then best, bestValue = d, v end
+                    local slot = findSlot(d, root) or d
+                    local rec = map[entry.name]
+                    if not rec then
+                        rec = {
+                            name = entry.name, entry = entry, label = d, slot = slot,
+                            value = itemValue(entry, readFlags(slot)),
+                            copies = 0, seen = {},
+                        }
+                        map[entry.name] = rec
+                        order[#order + 1] = rec
+                    end
+                    if not rec.seen[slot] then
+                        rec.seen[slot] = true
+                        rec.copies += 1
                     end
                 end
             end
         end
     end
-    return best, bestValue
+    return order
+end
+
+--============================================================== 9e. self-learning ui map
+-- The bot writes down what it sees and remembers the path of every control it
+-- found, so the next run clicks the exact same object instead of guessing.
+local function objPath(obj, root)
+    if not obj or not root then return "" end
+    local parts = {}
+    local p, guard = obj, 0
+    while p and p ~= root and guard < 14 do
+        local seg = tostring(p.Name)
+        local ok, cls = pcall(function() return p.ClassName end)
+        if ok and cls then seg = seg .. "#" .. tostring(cls) end
+        table.insert(parts, 1, seg)
+        p = p.Parent
+        guard += 1
+    end
+    return table.concat(parts, "/")
+end
+
+local function findByPath(root, path)
+    if not root or type(path) ~= "string" or path == "" then return nil end
+    local node = root
+    for seg in string.gmatch(path, "[^/]+") do
+        local name, cls = seg:match("^(.-)#([^#]+)$")
+        if not name then name, cls = seg, nil end
+        local found
+        for _, c in ipairs(node:GetChildren()) do
+            if tostring(c.Name) == name then
+                if not cls then found = c; break end
+                local ok, got = pcall(function() return c.ClassName end)
+                if ok and tostring(got) == cls then found = c; break end
+            end
+        end
+        if not found then return nil end
+        node = found
+    end
+    return node
+end
+
+local function listButtons(root)
+    local out = {}
+    for _, d in ipairs(root:GetDescendants()) do
+        if d:IsA("GuiButton") and isVisible(d) then
+            local sz = d.AbsoluteSize
+            if sz.X >= 18 and sz.Y >= 14 then
+                out[#out + 1] = {
+                    btn = d, label = guiLabel(d),
+                    path = objPath(d, getPlayerGui()),
+                    w = math.floor(sz.X), h = math.floor(sz.Y),
+                }
+            end
+        end
+    end
+    return out
+end
+
+-- writes everything clickable + every label on the current face of the UI
+local function learnDump(tag, root)
+    if not root or not writefile then return nil end
+    local lines = { "face " .. tostring(tag) .. "  " .. os.date("%Y-%m-%d %H:%M:%S") }
+    local buttons = listButtons(root)
+    table.sort(buttons, function(a, b) return a.label < b.label end)
+    for _, b in ipairs(buttons) do
+        lines[#lines + 1] = string.format("%-30s %4dx%-4d %s",
+            b.label:sub(1, 30), b.w, b.h, b.path)
+    end
+    local seenText = {}
+    for _, d in ipairs(root:GetDescendants()) do
+        if d:IsA("TextLabel") and isVisible(d) and d.Text ~= "" then
+            local t = d.Text:gsub("[\r\n]", " ")
+            if #t <= 44 and not seenText[t] then
+                seenText[t] = true
+                lines[#lines + 1] = "text: " .. t
+            end
+        end
+    end
+    local file = BOT.Folder .. "/auto_face_" .. tostring(tag) .. ".txt"
+    pcall(writefile, file, table.concat(lines, "\n"))
+    log("auto: face \"%s\" saved (%d buttons)", tostring(tag), #buttons)
+    return buttons
+end
+
+-- remember the exact object behind a role, so guessing happens once
+local function savePath(key, obj)
+    local pg = getPlayerGui()
+    if not pg or not obj then return end
+    local path = objPath(obj, pg)
+    if path == "" or (S[key] or "") == path then return end
+    S[key] = path
+    saveSettings()
+    log("auto: learned %s = %s", key, path)
+end
+
+local function findLearnedBtn(root, key, words, avoid)
+    local pg = getPlayerGui()
+    local saved = S[key]
+    if pg and type(saved) == "string" and saved ~= "" then
+        local obj = findByPath(pg, saved)
+        if obj and obj.Parent and obj:IsA("GuiButton") and isVisible(obj) then
+            return obj
+        end
+    end
+    local btn = findButtonIn(root, words, avoid)
+    if btn then savePath(key, btn) end
+    return btn
+end
+
+-- what to give away: cheap and duplicated first, so the upgrade is safe
+local function pickGiveItem(items, keep, pool)
+    local hasPool = next(pool) ~= nil
+    local floorV = tonumber(S.PhoneGiveMinValue) or 0.05
+    local best, bestScore
+    for _, it in ipairs(items) do
+        local key = normalize(it.entry.name)
+        local allowed = not keep[key] and (not hasPool or pool[key] ~= nil)
+        if allowed and it.value >= floorV then
+            if (not S.PhoneDuplicatesOnly) or it.copies >= 2 then
+                -- any duplicate beats any single copy, then the cheapest wins
+                local score = it.value + (it.copies >= 2 and 0 or 1000)
+                if not bestScore or score < bestScore then best, bestScore = it, score end
+            end
+        end
+    end
+    return best
+end
+
+-- what to ask for: a wanted item inside the window, else the best pet inside it
+local function pickWantItem(giveValue, keep)
+    local minPct = tonumber(S.PhoneUpgradeMinPct) or 10
+    local maxPct = tonumber(S.PhoneUpgradeMaxPct) or 60
+    local lo = giveValue * (1 + minPct / 100)
+    local hi = giveValue * (1 + maxPct / 100)
+
+    local wanted = parseList(S.WantedText)
+    local bestName, bestValue = nil, 0
+    for key, entry in pairs(VALUES) do
+        local v = entry.value or 0
+        if wanted[key] and v >= lo and v <= hi and not keep[key] and v > bestValue then
+            bestName, bestValue = entry.name, v
+        end
+    end
+    if bestName then return bestName, bestValue, "wanted list" end
+
+    for key, entry in pairs(VALUES) do
+        local v = entry.value or 0
+        if entry.cat == "pet" and v >= lo and v <= hi and not keep[key] and v > bestValue then
+            bestName, bestValue = entry.name, v
+        end
+    end
+    if bestName then return bestName, bestValue, "value table" end
+
+    for key, entry in pairs(VALUES) do
+        local v = entry.value or 0
+        if v >= lo and v <= hi and not keep[key] and v > bestValue then
+            bestName, bestValue = entry.name, v
+        end
+    end
+    return bestName, bestValue, bestName and "any category" or nil
+end
+
+-- the want picker: search for the name if there is a field, then click it
+local function selectWantItem(root, wantName)
+    return selectItemInPicker(root, wantName)
 end
 
 local function findListingCard(win, itemName)
@@ -3610,81 +4191,172 @@ local function findListingCard(win, itemName)
     return nil
 end
 
--- create/post flow: every step aborts cleanly when its control is missing
+-- create/post flow: give a cheap duplicate, ask for something worth more.
+-- Every step aborts cleanly when its control is missing.
 local function createPhoneListing(win)
     if not S.PhoneAutoList then return false end
     if os.clock() < (E.phone.createAt or 0) then return false end
     E.phone.createAt = os.clock() + 120
     if #(E.phone.listings or {}) >= (tonumber(S.PhoneMaxListings) or 2) then return false end
 
-    local createBtn = findButtonIn(win, PHONE_CREATE, PHONE_REMOVE)
-    if not createBtn then
-        log("phone: no create/post button here (posting works only in the Trading Hub)")
+    local budget = tonumber(S.PhoneBucksMax) or 0
+    if budget > 0 and (E.phone.bucks or 0) + 100 > budget then
+        log("phone: bucks budget reached (%d), not posting", E.phone.bucks or 0)
         return false
     end
+
+    local createBtn = findLearnedBtn(win, "PhoneCreatePath", PHONE_CREATE, PHONE_REMOVE)
+    if not createBtn then
+        log("phone: no create/post button here (posting works only in the Trading Hub)")
+        if S.PhoneAutoLearn then learnDump("no_create", uiRoot(win)) end
+        return false
+    end
+
     phoneClick(createBtn, "open the listing screen")
     task.wait(0.8)
 
     local root = uiRoot(createBtn)
-    local itemLabel, itemWorth = pickVisibleListingItem(root)
-    if not itemLabel then
-        log("phone: no allowed priced item in the picker")
+    local keep = parseList(S.KeepListText)
+    local pool = parseList(S.TradePoolText)
+
+    -- the plan comes from the real inventory; the visible picker is only a fallback
+    local giveName, giveValue, giveCopies, wantName, wantValue, gainPct, wantSource
+    local inv = ensureInventory()
+    local plan = inv and planUpgrades(inv.items, 1) or nil
+    if plan and plan[1] then
+        local step = plan[1]
+        giveName, giveValue = step.give, step.giveValue
+        wantName, wantValue, gainPct, wantSource = step.want, step.wantValue, step.pct, step.source
+        for _, it in ipairs(inv.items) do
+            if normalize(it.name) == normalize(step.give) then giveCopies = it.copies end
+        end
+        log("phone: inventory plan %s (%.3f, %s copies) -> %s (%.3f, +%.0f%%, from %s)",
+            giveName, giveValue, tostring(giveCopies), wantName, wantValue, gainPct, tostring(wantSource))
+    else
+        if S.PhoneScanInventory ~= false and not inventorySnapshot() then
+            log("phone: scanning the inventory first, posting on the next pass")
+            return false
+        end
+        local give = pickGiveItem(visibleItems(root), keep, pool)
+        if not give then
+            log("phone: nothing to give (duplicates only: %s, min value %.2f)",
+                tostring(S.PhoneDuplicatesOnly), tonumber(S.PhoneGiveMinValue) or 0.05)
+            return false
+        end
+        giveName, giveValue, giveCopies = give.name, give.value, give.copies
+        wantName, wantValue, wantSource = pickWantItem(give.value, keep)
+        if not wantName then
+            log("phone: no target for %.3f inside the +%d..+%d%% window",
+                give.value, tonumber(S.PhoneUpgradeMinPct) or 10, tonumber(S.PhoneUpgradeMaxPct) or 60)
+            return false
+        end
+        gainPct = (wantValue / give.value - 1) * 100
+        log("phone: picker plan %s (%.3f, %d copies) -> %s (%.3f, +%.0f%%, from %s)",
+            giveName, giveValue, giveCopies, wantName, wantValue, gainPct, tostring(wantSource))
+    end
+
+    local giveSlot = selectItemInPicker(root, giveName)
+    if not giveSlot then
+        log("phone: %s is not in the give picker", giveName)
         return false
     end
-    phoneClick(findSlot(itemLabel, root) or itemLabel.Parent, "pick " .. cleanItemName(itemLabel.Text))
+    phoneClick(giveSlot, "pick " .. giveName)
     task.wait(0.6)
 
-    local nextBtn = findButtonIn(root, PHONE_NEXT, PHONE_REMOVE)
+    local nextBtn = findLearnedBtn(root, "PhoneNextPath", PHONE_NEXT, PHONE_REMOVE)
     if not nextBtn then
         log("phone: no next/confirm after picking the item")
+        if S.PhoneAutoLearn then learnDump("no_next", root) end
         return false
     end
     phoneClick(nextBtn, "confirm the offered item")
     task.wait(0.8)
 
-    local askPct = tonumber(S.PhoneAskPct) or 30
-    local ask = itemWorth * (1 + askPct / 100)
-
-    local box
-    for _, d in ipairs(root:GetDescendants()) do
-        if d:IsA("TextBox") and isVisible(d) then box = d; break end
-    end
-    if not box then
-        log("phone: no ask field found - this step is unknown, send phone_dump.txt")
+    local wantSlot = selectWantItem(root, wantName)
+    if not wantSlot then
+        log("phone: %s is not in the want picker (send phone_dump.txt from this screen)", wantName)
         return false
     end
-    if S.PhoneDryRun then
-        log("phone (dry): would ask %.3f for %s", ask, cleanItemName(itemLabel.Text))
+    phoneClick(wantSlot, "pick the wanted item " .. wantName)
+    task.wait(0.5)
+
+    local post = findLearnedBtn(root, "PhonePostPath", { "post", "publish", "list", "confirm" }, PHONE_REMOVE)
+    if not post then
+        log("phone: no post button on the last screen")
+        if S.PhoneAutoLearn then learnDump("no_post", root) end
         return false
     end
-
-    pcall(function()
-        box.Text = string.format("%.2f", ask)
-        box:CaptureFocus()
-        task.wait(0.15)
-        box:ReleaseFocus()
-    end)
-    local post = findButtonIn(root, { "post", "list", "confirm" }, PHONE_REMOVE)
-    if not phoneClick(post, "post the listing") then return false end
+    if not phoneClick(post, string.format("post %s for %s", give.name, wantName)) then return false end
     task.wait(1)
 
+    E.phone.bucks = (E.phone.bucks or 0) + 100
     E.phone.listings[#E.phone.listings + 1] = {
-        item = cleanItemName(itemLabel.Text),
-        value = itemWorth,
-        askV = ask,
+        item = give.name,
+        value = give.value,
+        want = wantName,
+        askV = wantValue,
         at = os.time(),
     }
     sendPhoneWebhook("Listing posted", 0x3498DB, {
-        { name = "Offering", value = string.format("%s (%.3f)", cleanItemName(itemLabel.Text), itemWorth), inline = false },
-        { name = "Asking", value = string.format("%.3f (+%d%%)", ask, askPct), inline = false },
+        { name = "I offer", value = string.format("%s (%.3f)", give.name, give.value), inline = true },
+        { name = "I want", value = string.format("%s (%.3f)", wantName, wantValue), inline = true },
+        { name = "If it sells", value = string.format("+%.0f%% | bucks spent: %d", gainPct, E.phone.bucks or 0), inline = false },
     }, "listing", {
         slot = "ask",
-        items = cleanItemName(itemLabel.Text),
+        items = give.name,
         n = 1,
-        ask = string.format("%.2f", ask),
-        askV = ask,
-        askPct = askPct,
+        ask = wantName,
+        askV = wantValue,
+        askPct = gainPct,
     })
+    return true
+end
+
+-- what the bot would post right now (for the Tools button)
+local function planNextListing()
+    local inv = inventorySnapshot()
+    if inv then
+        local plan, startTotal, planned = planUpgrades(inv.items)
+        if #plan == 0 then
+            return string.format("inventory %.3f: nothing safe to upgrade (duplicates only: %s, min %.2f)",
+                inv.total or 0, tostring(S.PhoneDuplicatesOnly), tonumber(S.PhoneGiveMinValue) or 0.05)
+        end
+        return describePlan(plan, startTotal, planned)
+    end
+
+    local win = findPhoneWindow()
+    local root = (win and uiRoot(win)) or getPlayerGui()
+    if not root then return "no player GUI" end
+    local keep = parseList(S.KeepListText)
+    local pool = parseList(S.TradePoolText)
+    local give = pickGiveItem(visibleItems(root), keep, pool)
+    if not give then
+        return "no inventory snapshot yet: press \"Scan inventory\", then check Duplicates only / Allowed to give"
+    end
+    local wantName, wantValue, wantSource = pickWantItem(give.value, keep)
+    if not wantName then
+        return string.format("no target for %s (%.3f): widen the +%d..+%d%% window",
+            give.name, give.value, tonumber(S.PhoneUpgradeMinPct) or 10, tonumber(S.PhoneUpgradeMaxPct) or 60)
+    end
+    return string.format("%s (%.3f, %d copies) -> %s (%.3f, +%.0f%%, from %s)",
+        give.name, give.value, give.copies, wantName, wantValue,
+        (wantValue / give.value - 1) * 100, tostring(wantSource))
+end
+
+-- Tools button: read the inventory right now, save it and show the plan
+local function scanInventoryNow()
+    E.inv.busy = true
+    local ok, err = scanInventoryBrain()
+    if not ok then
+        E.inv.busy = false
+        log("inventory: scan failed (%s)", tostring(err))
+        notify("Inventory", "scan failed: " .. tostring(err), 5)
+        return false
+    end
+    local body = writeInventoryDump()
+    log("inventory scan:\n%s", body)
+    sendInventoryCard()
+    notify("Inventory", string.format("%d items, %.3f total", E.inv.count or 0, E.inv.total or 0), 6)
     return true
 end
 
@@ -3705,6 +4377,13 @@ local function stepPhone()
     local cards = phoneCards(win)
     E.phone.cards = #cards
     local floor = phoneFloor()
+
+    -- the bot photographs the window it sees, once a minute, so the real UI can
+    -- be mapped from files instead of guessing
+    if S.PhoneAutoLearn and os.clock() >= (E.phone.learnAt or 0) then
+        E.phone.learnAt = os.clock() + 60
+        learnDump("phone", uiRoot(win))
+    end
 
     -- 1. the best offer on our listings
     if S.PhoneAutoAcceptOffers and #cards > 0 then
@@ -3808,7 +4487,7 @@ local function scanPhone()
         lines[#lines + 1] = "window: " .. win:GetFullName()
         local labels = {}
         for _, b in ipairs(collectButtons(win)) do
-            labels[#labels + 1] = tostring(b.Text ~= "" and b.Text or b.Name)
+            labels[#labels + 1] = guiLabel(b)
         end
         table.sort(labels)
         lines[#lines + 1] = "buttons: " .. table.concat(labels, " | ")
@@ -3819,9 +4498,20 @@ local function scanPhone()
             lines[#lines + 1] = string.format("  #%d %.3f | decline=%s | %s",
                 i, o.theirValue or 0, ci.decline and "yes" or "no", shortList(o.theirs, 6))
         end
-        lines[#lines + 1] = string.format("listings known: %d", #E.phone.listings)
-        for i, rec in ipairs(E.phone.listings) do
+        lines[#lines + 1] = string.format("listings known: %d", #E.phone.listings)        for i, rec in ipairs(E.phone.listings) do
             lines[#lines + 1] = string.format("  #%d %s value %.3f ask %.3f", i, tostring(rec.item), rec.value or 0, rec.askV or 0)
+        end
+        lines[#lines + 1] = "next plan: " .. planNextListing()
+        lines[#lines + 1] = string.format("learned: create=%s | next=%s | post=%s",
+            (S.PhoneCreatePath ~= "" and S.PhoneCreatePath or "-"),
+            (S.PhoneNextPath ~= "" and S.PhoneNextPath or "-"),
+            (S.PhonePostPath ~= "" and S.PhonePostPath or "-"))
+        local inv = inventorySnapshot()
+        if inv then
+            lines[#lines + 1] = string.format("inventory snapshot: %d stacks / %d items / %.3f (age %ds)",
+                #inv.items, inv.count or 0, inv.total or 0, os.time() - (inv.at or 0))
+        else
+            lines[#lines + 1] = "inventory snapshot: none (press \"Scan inventory\")"
         end
     end
     local body = table.concat(lines, "\n")
@@ -3924,6 +4614,23 @@ task.spawn(function()
 end)
 
 --============================================================== 11. debug tools
+local function copyToClipboard(text)
+    if type(text) ~= "string" or text == "" then return false end
+    local fn = G("setclipboard") or G("toclipboard")
+    if type(fn) ~= "function" then return false end
+    local ok = pcall(fn, text)
+    return ok
+end
+
+local function copyFile(relPath)
+    if not readfile then return false end
+    local ok, body = pcall(readfile, BOT.Folder .. "/" .. relPath)
+    if not ok or type(body) ~= "string" or body == "" then return false end
+    if not copyToClipboard(body) then return false end
+    notify("Clipboard", relPath .. " copied (" .. #body .. " bytes)", 4)
+    return true
+end
+
 local function dumpGuiTree()
     local pg = getPlayerGui()
     if not pg or not writefile then return false end
@@ -3952,6 +4659,85 @@ local function dumpGuiTree()
         notify("GUI dump", "Saved to " .. BOT.GuiDumpFile, 5)
     end
     return ok
+end
+
+-- every remote that could be trade/listing related, so we can stop guessing the UI
+local function dumpRemotes()
+    if not writefile then return false end
+    local rs = game:GetService("ReplicatedStorage")
+    local lines = { "Remote dump " .. os.date("%Y-%m-%d %H:%M:%S") }
+    local function walk(obj, depth)
+        if depth > 4 then return end
+        if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") or obj:IsA("BindableEvent") then
+            lines[#lines + 1] = string.rep("  ", depth) .. obj.ClassName .. "  " .. obj:GetFullName()
+        end
+        for _, c in ipairs(obj:GetChildren()) do walk(c, depth + 1) end
+    end
+    walk(rs, 0)
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = "all top-level ReplicatedStorage children:"
+    for _, c in ipairs(rs:GetChildren()) do
+        lines[#lines + 1] = "  " .. c.ClassName .. "  " .. c.Name
+    end
+    local body = table.concat(lines, "\n")
+    local ok = pcall(writefile, BOT.Folder .. "/remotes.txt", body)
+    if ok then
+        log("remotes written to %s (%d lines)", BOT.Folder .. "/remotes.txt", #lines)
+        notify("Remotes", "Saved to remotes.txt", 5)
+    end
+    return ok
+end
+
+-- records what YOU click, so the real listing flow can be mapped exactly
+local clickLog = {}
+
+local function describeClickObject(obj)
+    local parts = {}
+    local p, guard = obj, 0
+    while p and p ~= game and guard < 8 do
+        local label = p.Name
+        local okText, text = pcall(function() return p.Text end)
+        if okText and type(text) == "string" and text ~= "" then
+            label = label .. '["' .. text:gsub("[\r\n]", " "):sub(1, 40) .. '"]'
+        end
+        table.insert(parts, 1, label)
+        p = p.Parent
+        guard += 1
+    end
+    return table.concat(parts, " > ")
+end
+
+local function recordClick(x, y)
+    local pg = getPlayerGui()
+    if not pg then return end
+    local objs
+    local ok = pcall(function() objs = pg:GetGuiObjectsAtPosition(x, y) end)
+    if not ok or type(objs) ~= "table" or #objs == 0 then return end
+    local names = {}
+    for i = 1, math.min(#objs, 5) do
+        local o = objs[i]
+        if o:IsA("GuiObject") and isVisible(o) then
+            names[#names + 1] = describeClickObject(o)
+        end
+    end
+    if #names == 0 then return end
+    local line = string.format("%s  (%d,%d)  %s", os.date("%H:%M:%S"),
+        math.floor(x), math.floor(y), table.concat(names, " ;; "))
+    clickLog[#clickLog + 1] = line
+    if #clickLog > 300 then table.remove(clickLog, 1) end
+    log("click: %s", line)
+    if writefile then pcall(writefile, BOT.Folder .. "/clicks.txt", table.concat(clickLog, "\n")) end
+end
+
+local function startClickRecorder()
+    local UIS = game:GetService("UserInputService")
+    UIS.InputBegan:Connect(function(input)
+        if not S.ClickRecorder then return end
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+            task.spawn(function() recordClick(input.Position.X, input.Position.Y) end)
+        end
+    end)
 end
 
 local function scanNow()
@@ -4306,9 +5092,18 @@ local function buildUI()
     toggle("PhoneAutoDeclineBad", "Decline weak offers")
     toggle("PhoneOfferSwap", "Drop the weakest offer over the cap")
     toggle("PhoneAutoList", "Post listings (100 bucks each)")
+    toggle("PhoneScanInventory", "Read my inventory before posting")
+    toggle("PhoneAutoLearn", "Auto-dump the phone UI (self-learning)")
+    input("PhoneInvMaxAge", "Rescan inventory after N seconds", true)
+    input("PhoneInvPasses", "Inventory scan passes (scroll pages)", true)
+    input("PhoneUpgradeSteps", "Upgrade chain depth", true)
     input("PhoneListedValue", "Value of a listing I posted by hand (0 = off)", true)
     input("PhoneMinOfferValue", "Or accept offers worth at least (0 = off)", true)
-    input("PhoneAskPct", "Ask price: % above value", true)
+    input("PhoneUpgradeMinPct", "Ask listing: min gain %", true)
+    input("PhoneUpgradeMaxPct", "Ask listing: max gain % (guardrails)", true)
+    input("PhoneBucksMax", "Bucks budget per session (0 = no limit)", true)
+    input("PhoneGiveMinValue", "Never list anything cheaper than", true)
+    toggle("PhoneDuplicatesOnly", "Only list pets I own 2+ of")
     input("PhoneMaxListings", "Max listings", true)
     input("PhoneMaxOffers", "Max waiting offers", true)
     input("PhoneRefreshMin", "Take a listing down after N minutes", true)
@@ -4325,6 +5120,7 @@ local function buildUI()
     input("Delay", "Loop delay (seconds)", true)
     input("ToggleKey", "Toggle key (e.g. RightControl)", false)
     toggle("Debug", "Verbose log")
+    toggle("ClickRecorder", "Record my clicks (map the real UI)")
 
     section("Tools")
     button("Test webhook", function()
@@ -4363,6 +5159,26 @@ local function buildUI()
         end)
     end)
 
+    button("Scan inventory", function()
+        task.spawn(function()
+            if scanInventoryNow() then notify("Inventory", "Saved to inventory_dump.txt", 4) end
+        end)
+    end)
+    button("Plan upgrade chain", function()
+        task.spawn(function()
+            if not inventorySnapshot() then scanInventoryNow() end
+            local plan = planNextListing()
+            log("upgrade chain: %s", plan)
+            notify("Upgrade chain", plan:sub(1, 120), 8)
+        end)
+    end)
+
+    button("Plan next listing", function()
+        local plan = planNextListing()
+        log("phone plan: %s", plan)
+        notify("Next listing", plan:sub(1, 120), 6)
+    end)
+
     button("Scan trade window", scanNow)
     button("Scan trade phone", function()
         local body = scanPhone()
@@ -4375,6 +5191,30 @@ local function buildUI()
         end)
     end)
     button("Dump GUI tree to file", dumpGuiTree)
+    button("Learn phone UI now", function()
+        local win = findPhoneWindow()
+        local root = (win and uiRoot(win)) or getPlayerGui()
+        if not root then notify("Learn", "no player GUI", 4) return end
+        local buttons = learnDump("manual", root)
+        notify("Learn", string.format("%d buttons saved to auto_face_manual.txt", buttons and #buttons or 0), 5)
+    end)
+    button("Copy clicks.txt", function()
+        if not copyFile("clicks.txt") then
+            notify("Clipboard", "clicks.txt is empty: turn on Record my clicks first", 5)
+        end
+    end)
+    button("Copy log.txt", function()
+        if not copyFile("log.txt") then notify("Clipboard", "log.txt is empty", 4) end
+    end)
+    button("Dump remotes to file", function()
+        if dumpRemotes() then notify("Remotes", "Saved to remotes.txt", 4) end
+    end)
+    button("Copy remotes.txt", function()
+        if not copyFile("remotes.txt") then notify("Clipboard", "press Dump remotes first", 4) end
+    end)
+    button("Copy inventory_dump.txt", function()
+        if not copyFile("inventory_dump.txt") then notify("Clipboard", "press Scan inventory first", 4) end
+    end)
     button("Update values from amvgg.com", function()
         task.spawn(function() updateValuesFromWeb(false) end)
     end)
@@ -4519,6 +5359,12 @@ local ok, err = pcall(function()
     BOT.sessionProfit = sessionProfit
     BOT.scanPhone = scanPhone
     BOT.stepPhone = stepPhone
+    BOT.planNextListing = planNextListing
+    BOT.scanInventory = scanInventoryNow
+    BOT.planUpgrades = planUpgrades
+    BOT.inventory = E.inv
+    BOT.dumpRemotes = dumpRemotes
+    BOT.learnDump = learnDump
     BOT.phone = E.phone
     BOT.api = {
         getSettings = function() return S end,
@@ -4538,6 +5384,7 @@ local ok, err = pcall(function()
 
     buildUI()
     bindKey()
+    startClickRecorder()
 
     log("AdoptMe Trade Bot v%s loaded | %d values", BOT.Version, countValues())
     notify("Adopt Me Trade Bot", "Loaded - " .. countValues() .. " prices", 4)

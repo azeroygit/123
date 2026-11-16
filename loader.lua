@@ -7,7 +7,7 @@
     Put the raw URL of AdoptMeTradeBot.lua below.
 ============================================================================]]
 
-local URL = "https://raw.githubusercontent.com/azeroygit/s/main/AdoptMeTradeBot.lua"
+local URL = "https://raw.githubusercontent.com/azeroygit/123/main/AdoptMeTradeBot.lua"
 
 local FOLDER = "AdoptMeTradeBot"
 local ERROR_FILE = FOLDER .. "/start_error.txt"
