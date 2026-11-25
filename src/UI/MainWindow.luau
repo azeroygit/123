@@ -115,9 +115,36 @@ function MainWindow:mount(parentGui: any?)
 	local screenGui = Instance.new("ScreenGui")
 	screenGui.Name = "KiriaAutoTraderUI"
 	screenGui.ResetOnSpawn = false
+	screenGui.AutoLocalize = false
 	screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 	screenGui.Parent = targetParent
 	self._gui = screenGui
+
+	-- Responsive UIScale for smaller viewports (inspired by AdoptMeFarm)
+	pcall(function()
+		local cam = workspace and workspace.CurrentCamera
+		if cam then
+			local vp = cam.ViewportSize
+			local scale = math.min(1, (vp.X - 40) / 880, (vp.Y - 40) / 560)
+			if scale < 0.98 and scale > 0.4 then
+				local uiScale = Instance.new("UIScale")
+				uiScale.Name = "KiriaScale"
+				uiScale.Scale = scale
+				uiScale.Parent = screenGui
+			end
+		end
+	end)
+
+	-- Fallback to CoreGui if gethui() didn't render
+	if type(task) == "table" and type(task.delay) == "function" then
+		task.delay(1.5, function()
+			pcall(function()
+				if self._gui and self._root and self._root.AbsoluteSize.X == 0 then
+					self._gui.Parent = game:GetService("CoreGui")
+				end
+			end)
+		end)
+	end
 
 	pcall(function()
 		local UserInputService = game:GetService("UserInputService")

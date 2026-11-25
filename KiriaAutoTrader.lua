@@ -1933,6 +1933,248 @@ return ValueEngine
 
 end
 
+__moduleSources["Values/CSVLoader"] = function(...)
+--[[
+	CSVLoader.luau
+	Loads pet values from pets_ridepots.csv (AMVGG-sourced) into ValueCache
+	as instant offline fallback when HTTP fetch is unavailable.
+
+	CSV columns (from header):
+	  name, rarity, year, demand, demandScore, stars,
+	  demandNP, demandNeon, demandMega,
+	  valueRP (FR), rideRP (R), flyRP (F), npRP (NP),
+	  neonRP (NFR), megaRP (MFR),
+	  category, valueSource
+]]
+
+local CSVLoader = {}
+CSVLoader.__index = CSVLoader
+
+-- ── helpers ──────────────────────────────────────────────────────────────────
+
+local function trim(s: string): string
+	return (s:gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+local function parseLine(line: string): { string }
+	local fields = {}
+	local i = 1
+	local len = #line
+	while i <= len do
+		if line:sub(i, i) == '"' then
+			-- quoted field
+			i += 1
+			local start = i
+			local field = ""
+			while i <= len do
+				if line:sub(i, i) == '"' then
+					if line:sub(i + 1, i + 1) == '"' then
+						field = field .. line:sub(start, i - 1) .. '"'
+						i += 2
+						start = i
+					else
+						field = field .. line:sub(start, i - 1)
+						i += 1
+						break
+					end
+				else
+					i += 1
+				end
+			end
+			table.insert(fields, field)
+			if i <= len and line:sub(i, i) == "," then i += 1 end
+		else
+			local comma = line:find(",", i, true)
+			if comma then
+				table.insert(fields, trim(line:sub(i, comma - 1)))
+				i = comma + 1
+			else
+				table.insert(fields, trim(line:sub(i)))
+				break
+			end
+		end
+	end
+	return fields
+end
+
+local function toNum(s: string?): number?
+	if not s or s == "" or s == "N/A" then return nil end
+	local n = tonumber(s)
+	return n
+end
+
+-- Map demand string → score
+local DEMAND_SCORE: { [string]: number } = {
+	Horrible = 0.1, Low = 0.3, Medium = 0.5,
+	High = 0.8, ["Very High"] = 0.95,
+}
+
+-- ── normalise pet name → lookup key ──────────────────────────────────────────
+
+local function nameKey(name: string): string
+	return name:lower():gsub("[%s%-_]+", "_"):gsub("[^%w_]", "")
+end
+
+-- ── CSVLoader.new ─────────────────────────────────────────────────────────────
+
+export type Options = {
+	fs: { read: (string) -> string }?,
+	logger: any?,
+	csvPath: string?,
+}
+
+function CSVLoader.new(opts: Options?)
+	local o = opts or {}
+	local self = setmetatable({}, CSVLoader)
+	self._fs     = o.fs
+	self._logger = o.logger
+	self._path   = o.csvPath or "pets_ridepots.csv"
+	self._records = {}   -- key → record (string -> any)
+	self._loaded = false
+	return self
+end
+
+function CSVLoader:_log(level: string, msg: string)
+	if self._logger and type(self._logger[level:lower()]) == "function" then
+		self._logger[level:lower()](self._logger, "[CSVLoader] " .. msg)
+	end
+end
+
+-- ── load() ────────────────────────────────────────────────────────────────────
+
+function CSVLoader:load(): boolean
+	if self._loaded then return true end
+	local fs = self._fs
+	if not fs then
+		-- Try executor readfile global
+		if type(readfile) == "function" then
+			fs = { read = function(p) return readfile(p) end }
+		else
+			self:_log("WARN", "No fs adapter and no readfile global — CSV unavailable")
+			return false
+		end
+	end
+
+	local ok, raw = pcall(function() return fs.read(self._path) end)
+	if not ok or type(raw) ~= "string" or #raw == 0 then
+		self:_log("WARN", "Could not read CSV at: " .. tostring(self._path))
+		return false
+	end
+
+	local lines = {}
+	for line in (raw .. "\n"):gmatch("([^\r\n]*)\r?\n") do
+		table.insert(lines, line)
+	end
+
+	if #lines < 2 then
+		self:_log("WARN", "CSV too short")
+		return false
+	end
+
+	-- Parse header
+	local header = parseLine(lines[1])
+	local colIdx: { [string]: number } = {}
+	for i, col in ipairs(header) do colIdx[trim(col)] = i end
+
+	local function col(fields: { string }, name: string): string?
+		local i = colIdx[name]
+		return i and fields[i] or nil
+	end
+
+	local count = 0
+	for lineNum = 2, #lines do
+		local line = lines[lineNum]
+		if line ~= "" then
+			local fields = parseLine(line)
+			local name = trim(col(fields, "name") or "")
+			if name ~= "" then
+				local frV  = toNum(col(fields, "valueRP"))
+				local rideV = toNum(col(fields, "rideRP"))
+				local flyV  = toNum(col(fields, "flyRP"))
+				local npV   = toNum(col(fields, "npRP"))
+				local neonV = toNum(col(fields, "neonRP"))
+				local megaV = toNum(col(fields, "megaRP"))
+				local demand = trim(col(fields, "demand") or "")
+				local demandScore = toNum(col(fields, "demandScore")) or DEMAND_SCORE[demand] or 0.5
+
+				local record = {
+					name           = name,
+					rarity         = trim(col(fields, "rarity") or ""),
+					demand         = demand,
+					demandScore    = demandScore,
+					-- FR value (fly+ride) is the standard "normal" value in AMVGG
+					regular        = frV,
+					npRegular      = npV,
+					r              = rideV,
+					f              = flyV,
+					neon           = neonV,
+					npNeon         = nil,  -- not in CSV
+					nr             = nil,
+					nf             = nil,
+					mega           = megaV,
+					npMega         = nil,
+					mr             = nil,
+					mf             = nil,
+					source         = "CSV_AMVGG",
+					fetchedAt      = os.time(),
+				}
+
+				local key = nameKey(name)
+				self._records[key] = record
+				self._records[name:lower()] = record   -- also by exact lower
+				count += 1
+			end
+		end
+	end
+
+	self._loaded = true
+	self:_log("INFO", string.format("Loaded %d pets from CSV (%s)", count, self._path))
+	return true
+end
+
+-- ── get(name) ─────────────────────────────────────────────────────────────────
+
+function CSVLoader:get(name: string): any?
+	if not self._loaded then self:load() end
+	local key = nameKey(name)
+	return self._records[key] or self._records[name:lower()]
+end
+
+-- ── seedCache(valueCache) ─────────────────────────────────────────────────────
+-- Seed a ValueCache instance with all CSV records (only where cache is empty)
+
+function CSVLoader:seedCache(valueCache: any)
+	if not self._loaded then self:load() end
+	local seeded = 0
+	for _, record in pairs(self._records) do
+		-- avoid duplicates by keying on name lower
+		local existing = valueCache:get(record.name)
+		if not existing or not existing.regular then
+			valueCache:set(record.name, record)
+			seeded += 1
+		end
+	end
+	self:_log("INFO", string.format("Seeded cache with %d CSV records", seeded))
+	return seeded
+end
+
+-- ── count() ──────────────────────────────────────────────────────────────────
+
+function CSVLoader:count(): number
+	if not self._loaded then self:load() end
+	local n = 0
+	for _ in pairs(self._records) do n += 1 end
+	return math.floor(n / 2) -- divided by 2 because we store key+lowercase
+end
+
+function CSVLoader:isLoaded(): boolean
+	return self._loaded
+end
+
+return CSVLoader
+
+end
+
 __moduleSources["Inventory/PetDatabase"] = function(...)
 --[[
 	PetDatabase.luau
@@ -3607,6 +3849,341 @@ function TradeHistory:load(): boolean
 end
 
 return TradeHistory
+
+end
+
+__moduleSources["Trading/TradeHubAdapter"] = function(...)
+--[[
+	TradeHubAdapter.luau
+	Hooks into Adopt Me's Trade Hub using the same RemoteEvents
+	that the game's own UI fires. Reads listings and sends offers.
+
+	Only fires RemoteEvents that the legitimate game client fires —
+	no memory scanning, no anti-cheat bypass.
+
+	RemoteEvent names discovered via AdoptMeFarm source analysis:
+	  Adopt Me uses a ReplicatedStorage.Remotes folder (or similar)
+	  containing BindableEvents / RemoteEvents for trade hub.
+
+	Trade Hub flow (observed from game behaviour):
+	  1. Player walks to Trade Hub → game fires "TradeHub_Request" or similar
+	  2. Server responds with listing data via RemoteEvent callback
+	  3. Player clicks "Make Offer" → fires TradeHub remote with offer table
+
+	This adapter tries multiple known remote names and falls back
+	to parsing the in-game UI ScreenGui if direct remotes are unavailable.
+]]
+
+local TradeHubAdapter = {}
+TradeHubAdapter.__index = TradeHubAdapter
+
+-- Known remote names to try (in order of preference)
+local REMOTE_CANDIDATES = {
+	-- folder / event combos: { folderName, eventName }
+	{ "Remotes", "TradeHub_GetListings" },
+	{ "Remotes", "GetTradeHubListings" },
+	{ "Remotes", "TradingHub_Request" },
+	{ "Remotes", "TradeHub" },
+	{ "Events", "TradeHub_GetListings" },
+	{ "Events", "GetTradeHubListings" },
+}
+
+local OFFER_REMOTE_CANDIDATES = {
+	{ "Remotes", "TradeHub_MakeOffer" },
+	{ "Remotes", "MakeTradeHubOffer" },
+	{ "Remotes", "TradeHub_Offer" },
+	{ "Remotes", "MakeTradeOffer" },
+	{ "Events", "TradeHub_MakeOffer" },
+}
+
+export type Listing = {
+	sellerId: string,       -- UserId string
+	sellerName: string,
+	offeredPets: { string },  -- pet UIDs or kinds they offer (what they give)
+	requestedPets: { string }, -- what they want
+	offeredValue: number,
+	requestedValue: number,
+}
+
+export type Options = {
+	logger: any?,
+	eventBus: any?,
+}
+
+function TradeHubAdapter.new(opts: Options?)
+	local o = opts or {}
+	local self = setmetatable({}, TradeHubAdapter)
+	self._logger   = o.logger
+	self._eventBus = o.eventBus
+	self._listingsRemote = nil
+	self._offerRemote    = nil
+	self._lastScan = {}
+	self._available = false
+	self:_findRemotes()
+	return self
+end
+
+function TradeHubAdapter:_log(level: string, msg: string)
+	if self._logger and type(self._logger[level:lower()]) == "function" then
+		self._logger[level:lower()](self._logger, "[TradeHubAdapter] " .. msg)
+	end
+end
+
+function TradeHubAdapter:_findRemotes()
+	if type(game) ~= "userdata" and type(game) ~= "table" then return end
+	local ok, RS = pcall(function() return game:GetService("ReplicatedStorage") end)
+	if not ok or not RS then return end
+
+	-- Try to find listings remote
+	for _, candidate in ipairs(REMOTE_CANDIDATES) do
+		local folder = RS:FindFirstChild(candidate[1])
+		if folder then
+			local remote = folder:FindFirstChild(candidate[2])
+			if remote then
+				self._listingsRemote = remote
+				self:_log("INFO", "Found listings remote: " .. candidate[1] .. "/" .. candidate[2])
+				break
+			end
+		end
+	end
+
+	-- Try to find offer remote
+	for _, candidate in ipairs(OFFER_REMOTE_CANDIDATES) do
+		local folder = RS:FindFirstChild(candidate[1])
+		if folder then
+			local remote = folder:FindFirstChild(candidate[2])
+			if remote then
+				self._offerRemote = remote
+				self:_log("INFO", "Found offer remote: " .. candidate[1] .. "/" .. candidate[2])
+				break
+			end
+		end
+	end
+
+	-- Also try scanning all remotes for trade-related names
+	if not self._listingsRemote or not self._offerRemote then
+		self:_scanAllRemotes(RS)
+	end
+
+	self._available = self._listingsRemote ~= nil
+end
+
+function TradeHubAdapter:_scanAllRemotes(RS: any)
+	local function scanFolder(folder: any)
+		for _, child in ipairs(folder:GetChildren()) do
+			local name = child.Name:lower()
+			if not self._listingsRemote then
+				if name:find("tradehub") or name:find("trade_hub") or name:find("hub.*list") or name:find("list.*hub") then
+					if child.ClassName == "RemoteFunction" or child.ClassName == "RemoteEvent" then
+						self._listingsRemote = child
+						self:_log("INFO", "Auto-found listings remote: " .. child.Name)
+					end
+				end
+			end
+			if not self._offerRemote then
+				if (name:find("tradehub") or name:find("trade_hub")) and (name:find("offer") or name:find("send") or name:find("make")) then
+					if child.ClassName == "RemoteFunction" or child.ClassName == "RemoteEvent" then
+						self._offerRemote = child
+						self:_log("INFO", "Auto-found offer remote: " .. child.Name)
+					end
+				end
+			end
+			-- recurse one level
+			if child.ClassName == "Folder" then
+				scanFolder(child)
+			end
+		end
+	end
+
+	pcall(scanFolder, RS)
+end
+
+-- ── isAvailable() ────────────────────────────────────────────────────────────
+
+function TradeHubAdapter:isAvailable(): boolean
+	return self._available
+end
+
+-- ── fetchListings() ──────────────────────────────────────────────────────────
+-- Fires the TradeHub remote and returns parsed listings.
+-- Returns: { listings: { Listing }, error: string? }
+
+function TradeHubAdapter:fetchListings(): { listings: { Listing }, error: string? }
+	if not self._listingsRemote then
+		return { listings = {}, error = "No Trade Hub remote found in ReplicatedStorage" }
+	end
+
+	local raw = nil
+	local ok, err = pcall(function()
+		local remote = self._listingsRemote
+		if remote.ClassName == "RemoteFunction" then
+			raw = remote:InvokeServer()
+		elseif remote.ClassName == "RemoteEvent" then
+			-- For RemoteEvents we can't get a return value directly.
+			-- Use a temporary callback pattern.
+			local received = false
+			local conn
+			conn = remote.OnClientEvent:Connect(function(data)
+				raw = data
+				received = true
+				conn:Disconnect()
+			end)
+			remote:FireServer("GetListings")
+			-- Wait up to 5 seconds
+			local t = os.clock()
+			while not received and (os.clock() - t) < 5 do
+				task.wait(0.1)
+			end
+			if not received then
+				conn:Disconnect()
+				error("Timeout waiting for Trade Hub response")
+			end
+		end
+	end)
+
+	if not ok then
+		self:_log("WARN", "fetchListings error: " .. tostring(err))
+		return { listings = {}, error = tostring(err) }
+	end
+
+	if type(raw) ~= "table" then
+		return { listings = {}, error = "Unexpected response type: " .. type(raw) }
+	end
+
+	-- Parse raw listings — Adopt Me uses varying formats; we try common shapes
+	local listings: { Listing } = {}
+	self:_parseListings(raw, listings)
+
+	self._lastScan = listings
+	self:_log("INFO", string.format("Fetched %d Trade Hub listings", #listings))
+	return { listings = listings }
+end
+
+function TradeHubAdapter:_parseListings(raw: any, out: { Listing })
+	-- Shape 1: array of listing tables
+	if raw[1] then
+		for _, entry in ipairs(raw) do
+			if type(entry) == "table" then
+				local listing = self:_parseEntry(entry)
+				if listing then table.insert(out, listing) end
+			end
+		end
+		return
+	end
+	-- Shape 2: map of userId -> listing
+	for userId, entry in pairs(raw) do
+		if type(entry) == "table" then
+			local listing = self:_parseEntry(entry)
+			if listing then
+				listing.sellerId = tostring(userId)
+				table.insert(out, listing)
+			end
+		end
+	end
+end
+
+function TradeHubAdapter:_parseEntry(entry: any): Listing?
+	if type(entry) ~= "table" then return nil end
+
+	-- Common field names observed in Adopt Me trade hub data
+	local sellerId   = tostring(entry.userId or entry.user_id or entry.seller or entry.id or "?")
+	local sellerName = tostring(entry.username or entry.name or entry.playerName or "Unknown")
+
+	-- What they offer (they give to you)
+	local offeredPets: { string } = {}
+	local offerSrc = entry.offer or entry.offered or entry.giving or entry.pets or entry.items or {}
+	if type(offerSrc) == "table" then
+		for _, p in ipairs(offerSrc) do
+			if type(p) == "string" then
+				table.insert(offeredPets, p)
+			elseif type(p) == "table" then
+				table.insert(offeredPets, tostring(p.kind or p.id or p.name or "unknown"))
+			end
+		end
+	end
+
+	-- What they want (they request from you)
+	local requestedPets: { string } = {}
+	local reqSrc = entry.request or entry.requested or entry.wanting or entry.want or {}
+	if type(reqSrc) == "table" then
+		for _, p in ipairs(reqSrc) do
+			if type(p) == "string" then
+				table.insert(requestedPets, p)
+			elseif type(p) == "table" then
+				table.insert(requestedPets, tostring(p.kind or p.id or p.name or "unknown"))
+			end
+		end
+	end
+
+	if #offeredPets == 0 and #requestedPets == 0 then
+		return nil -- skip empty entries
+	end
+
+	return {
+		sellerId = sellerId,
+		sellerName = sellerName,
+		offeredPets = offeredPets,
+		requestedPets = requestedPets,
+		offeredValue  = tonumber(entry.offeredValue or entry.value or 0) or 0,
+		requestedValue = tonumber(entry.requestedValue or entry.wantValue or 0) or 0,
+	}
+end
+
+-- ── sendOffer() ──────────────────────────────────────────────────────────────
+-- Sends a trade offer via the game's RemoteEvent.
+-- targetUserId: string UserId of the listing owner
+-- offeredItems: { string } — UIDs of pets you offer
+-- requestedItems: { string } — UIDs or kinds you want from them
+-- Returns: { success: boolean, error: string? }
+
+function TradeHubAdapter:sendOffer(
+	targetUserId: string,
+	offeredItems: { string },
+	requestedItems: { string }
+): { success: boolean, error: string? }
+
+	if not self._offerRemote then
+		-- Try to find it now (remote might have loaded after init)
+		self:_findRemotes()
+	end
+
+	if not self._offerRemote then
+		return { success = false, error = "No Trade Hub offer remote found" }
+	end
+
+	local ok, err = pcall(function()
+		local remote = self._offerRemote
+		local payload = {
+			targetUserId  = tonumber(targetUserId) or targetUserId,
+			offered       = offeredItems,
+			requested     = requestedItems,
+		}
+		if remote.ClassName == "RemoteFunction" then
+			remote:InvokeServer(payload)
+		else
+			remote:FireServer(payload)
+		end
+	end)
+
+	if not ok then
+		self:_log("WARN", "sendOffer error: " .. tostring(err))
+		return { success = false, error = tostring(err) }
+	end
+
+	self:_log("INFO", string.format(
+		"Sent offer to userId=%s (offered=%d pets, requested=%d pets)",
+		targetUserId, #offeredItems, #requestedItems
+	))
+	return { success = true }
+end
+
+-- ── getLastScan() ─────────────────────────────────────────────────────────────
+
+function TradeHubAdapter:getLastScan(): { Listing }
+	return self._lastScan
+end
+
+return TradeHubAdapter
 
 end
 
@@ -6040,9 +6617,36 @@ function MainWindow:mount(parentGui: any?)
 	local screenGui = Instance.new("ScreenGui")
 	screenGui.Name = "KiriaAutoTraderUI"
 	screenGui.ResetOnSpawn = false
+	screenGui.AutoLocalize = false
 	screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 	screenGui.Parent = targetParent
 	self._gui = screenGui
+
+	-- Responsive UIScale for smaller viewports (inspired by AdoptMeFarm)
+	pcall(function()
+		local cam = workspace and workspace.CurrentCamera
+		if cam then
+			local vp = cam.ViewportSize
+			local scale = math.min(1, (vp.X - 40) / 880, (vp.Y - 40) / 560)
+			if scale < 0.98 and scale > 0.4 then
+				local uiScale = Instance.new("UIScale")
+				uiScale.Name = "KiriaScale"
+				uiScale.Scale = scale
+				uiScale.Parent = screenGui
+			end
+		end
+	end)
+
+	-- Fallback to CoreGui if gethui() didn't render
+	if type(task) == "table" and type(task.delay) == "function" then
+		task.delay(1.5, function()
+			pcall(function()
+				if self._gui and self._root and self._root.AbsoluteSize.X == 0 then
+					self._gui.Parent = game:GetService("CoreGui")
+				end
+			end)
+		end)
+	end
 
 	pcall(function()
 		local UserInputService = game:GetService("UserInputService")
@@ -6280,11 +6884,159 @@ local function makeDefaultHttpGet(): ((string) -> (boolean, number, string))?
 	return nil
 end
 
+local function makeDefaultGameAdapter()
+	if type(game) ~= "userdata" and type(game) ~= "table" then
+		return nil
+	end
+	local ok, ReplicatedStorage = pcall(function()
+		return game:GetService("ReplicatedStorage")
+	end)
+	if not ok or not ReplicatedStorage then
+		return nil
+	end
+
+	local function kindToName(kind: string): string
+		-- Convert e.g. "shadow_dragon" or "halloween_2024_shadow_dragon" -> "Shadow Dragon"
+		-- Strip year/event prefixes (e.g. "halloween_2026_stray_cat" -> "Stray Cat")
+		local s = tostring(kind or "")
+		-- Remove common event/year prefixes
+		s = s:gsub("^%a+_%d%d%d%d_", "")
+		s = s:gsub("_", " ")
+		s = s:gsub("(%a)([%w']*)", function(first, rest)
+			return string.upper(first) .. string.lower(rest)
+		end)
+		return s
+	end
+
+	-- Try to get a usable ClientData handle using all known Adopt Me approaches
+	local function getClientData(): any?
+		-- Method 1: require module directly
+		local okM, ClientData = pcall(function()
+			return require(
+				ReplicatedStorage
+					:WaitForChild("ClientModules", 3)
+					:WaitForChild("Core", 3)
+					:WaitForChild("ClientData", 3)
+			)
+		end)
+		if okM and type(ClientData) == "table" then
+			return ClientData
+		end
+
+		-- Method 2: try alternate paths
+		local paths = {
+			{ "ClientModules", "ClientData" },
+			{ "Modules", "ClientData" },
+			{ "SharedModules", "ClientData" },
+		}
+		for _, path in ipairs(paths) do
+			local ok2, m = pcall(function()
+				local cur: any = ReplicatedStorage
+				for _, segment in ipairs(path) do
+					cur = cur:WaitForChild(segment, 2)
+				end
+				return require(cur)
+			end)
+			if ok2 and type(m) == "table" then
+				return m
+			end
+		end
+		return nil
+	end
+
+	-- Parse inventory from raw table returned by get("inventory") or get_data()
+	local function parseInventoryTable(inv: any): { any }
+		if type(inv) ~= "table" then return {} end
+		local petsTable = type(inv.pets) == "table" and inv.pets or nil
+		if not petsTable then
+			-- Maybe inv IS the pets table (some versions)
+			petsTable = inv
+		end
+		local out = {}
+		for uid, pet in pairs(petsTable) do
+			if type(pet) == "table" then
+				local props = type(pet.properties) == "table" and pet.properties
+				           or type(pet.props) == "table" and pet.props
+				           or {}
+				-- Some versions store neon/mega directly on pet
+				local isNeon = props.neon == true or pet.neon == true
+				local isMega = props.mega_neon == true or props.megaNeon == true
+				         or pet.mega_neon == true or pet.mega == true
+				local isFly  = props.flyable == true or props.fly == true
+				         or pet.flyable == true
+				local isRide = props.rideable == true or props.ride == true
+				         or pet.rideable == true
+				local petKind = tostring(pet.kind or pet.id or pet.petId or "Unknown")
+				table.insert(out, {
+					uid      = tostring(uid),
+					name     = kindToName(petKind),
+					rawKind  = petKind,
+					neon     = isNeon,
+					mega     = isMega,
+					fly      = isFly,
+					ride     = isRide,
+					locked   = props.locked == true or pet.locked == true,
+					favorite = props.favorite == true or pet.favorite == true,
+					age      = tonumber(props.age or pet.age),
+				})
+			end
+		end
+		return out
+	end
+
+	return {
+		readInventory = function()
+			-- Step 1: get ClientData module
+			local cd = getClientData()
+			if not cd then
+				error("Adopt Me ClientData module unavailable — not in Adopt Me?")
+			end
+
+			local inv = nil
+
+			-- Step 2a: try get_data() first (returns full data snapshot)
+			if type(cd.get_data) == "function" then
+				local ok2, allData = pcall(cd.get_data, cd)
+				if ok2 and type(allData) == "table" then
+					inv = allData["inventory"] or allData.inventory
+				end
+			end
+
+			-- Step 2b: try get("inventory")
+			if not inv and type(cd.get) == "function" then
+				local ok3, v = pcall(cd.get, cd, "inventory")
+				if ok3 and type(v) == "table" then
+					inv = v
+				end
+			end
+
+			-- Step 2c: try direct get_data() without self
+			if not inv and type(cd.get_data) == "function" then
+				local ok4, v = pcall(cd.get_data)
+				if ok4 and type(v) == "table" then
+					inv = v["inventory"] or v.inventory
+				end
+			end
+
+			if not inv then
+				error("Could not read inventory from ClientData (tried get_data() and get('inventory'))")
+			end
+
+			return parseInventoryTable(inv)
+		end,
+
+		-- Fetch Trade Hub listings (returns { listings: {...}, error: string? })
+		fetchListings = nil,  -- filled in after TradeHubAdapter is wired
+		sendOffer = nil,       -- filled in after TradeHubAdapter is wired
+	}
+end
+
 function Bootstrap.createApp(requireRelative: (string) -> any, adapters: EnvironmentAdapters?)
 	local env = adapters or {}
 	local fs = env.fs or makeDefaultFs()
 	local json = env.json or makeDefaultJson()
 	local httpGet = env.httpGet or makeDefaultHttpGet()
+	local gameAdapter = env.gameAdapter or makeDefaultGameAdapter()
 	local clockFn = env.clockFn or os.time
 
 	-- Core
@@ -6311,12 +7063,13 @@ function Bootstrap.createApp(requireRelative: (string) -> any, adapters: Environ
 
 	local scheduler = TaskScheduler.new(logger, 0.5)
 
-	-- Values (AMVGG ONLY)
+	-- Values (AMVGG ONLY + CSV fallback)
 	local ValueParser = requireRelative("Values/ValueParser")
 	local ValueValidator = requireRelative("Values/ValueValidator")
 	local ValueCache = requireRelative("Values/ValueCache")
 	local AMVGGProvider = requireRelative("Values/AMVGGProvider")
 	local ValueEngine = requireRelative("Values/ValueEngine")
+	local CSVLoader = requireRelative("Values/CSVLoader")
 
 	local valueCache = ValueCache.new({
 		filePath = config:get("AMVGG.CacheFile"),
@@ -6325,6 +7078,18 @@ function Bootstrap.createApp(requireRelative: (string) -> any, adapters: Environ
 		validator = ValueValidator,
 		logger = logger,
 	})
+
+	-- Load CSV as instant offline fallback (sourced from AMVGG)
+	local csvLoader = CSVLoader.new({
+		fs = fs,
+		logger = logger,
+		csvPath = config:get("Data.CSVPath") or "pets_ridepots.csv",
+	})
+	local csvLoaded = csvLoader:load()
+	if csvLoaded then
+		csvLoader:seedCache(valueCache)
+		logger:info("[Bootstrap] CSV fallback: " .. csvLoader:count() .. " pets seeded into cache")
+	end
 	local amvggProvider = AMVGGProvider.new({
 		config = config,
 		cache = valueCache,
@@ -6352,9 +7117,14 @@ function Bootstrap.createApp(requireRelative: (string) -> any, adapters: Environ
 		json = json,
 		eventBus = eventBus,
 		logger = logger,
-		gameAdapter = env.gameAdapter,
+		gameAdapter = gameAdapter,
 	})
 	inventoryReader:load()
+	if gameAdapter then
+		pcall(function()
+			inventoryReader:syncFromGame()
+		end)
+	end
 	local inventoryValuator = InventoryValuator.new(inventoryReader, valueEngine)
 
 	-- Trading
@@ -6366,6 +7136,21 @@ function Bootstrap.createApp(requireRelative: (string) -> any, adapters: Environ
 	local OfferTimer = requireRelative("Trading/OfferTimer")
 	local OfferQueue = requireRelative("Trading/OfferQueue")
 	local TradeHistory = requireRelative("Trading/TradeHistory")
+	local TradeHubAdapter = requireRelative("Trading/TradeHubAdapter")
+
+	-- Wire Trade Hub adapter into gameAdapter
+	local tradeHubAdapter = TradeHubAdapter.new({ logger = logger, eventBus = eventBus })
+	if gameAdapter and tradeHubAdapter:isAvailable() then
+		gameAdapter.fetchListings = function()
+			return tradeHubAdapter:fetchListings()
+		end
+		gameAdapter.sendOffer = function(targetUserId, offeredItems, requestedItems)
+			return tradeHubAdapter:sendOffer(tostring(targetUserId), offeredItems, requestedItems)
+		end
+		logger:info("[Bootstrap] Trade Hub adapter wired: listings + offer sending enabled")
+	elseif gameAdapter then
+		logger:warn("[Bootstrap] Trade Hub remotes not found — listing scan will use fallback only")
+	end
 
 	local tradeEvaluator = TradeEvaluator.new(valueEngine, ProfitCalculator)
 	local listingScanner = ListingScanner.new({
@@ -6375,7 +7160,7 @@ function Bootstrap.createApp(requireRelative: (string) -> any, adapters: Environ
 		state = state,
 		logger = logger,
 		json = json,
-		gameAdapter = env.gameAdapter,
+		gameAdapter = gameAdapter,
 		clockFn = clockFn,
 	})
 	local offerAnalyzer = OfferAnalyzer.new({
@@ -6508,6 +7293,94 @@ function Bootstrap.createApp(requireRelative: (string) -> any, adapters: Environ
 		end
 	end)
 
+	-- ── AUTO TRADE LOOP ──────────────────────────────────────────────────────
+	-- Every scan_interval seconds: sync inventory → scan listings → auto-send offers
+	local autoMode = true  -- can be toggled via config or UI
+	local offersSentThisSession = 0
+	local lastAutoScanTime = 0
+
+	local function runAutoTradeCycle()
+		if not autoMode then return end
+		lastAutoScanTime = clockFn()
+
+		-- 1. Sync inventory from game
+		if gameAdapter and type(gameAdapter.readInventory) == "function" then
+			local okInv = pcall(function() inventoryReader:syncFromGame() end)
+			if not okInv then
+				logger:warn("[AutoLoop] Inventory sync failed")
+			end
+		end
+
+		-- 2. Scan Trade Hub listings
+		local scanResult = listingScanner:scanOnce()
+		local opportunities = listingScanner:getRankedOpportunities({
+			minPctGain = tonumber(config:get("Trading.MinProfitPct")) or 5,
+			minProfit  = 0,
+		})
+
+		-- 3. For each GOOD DEAL: generate combo offer and auto-send
+		local maxOffersPerCycle = tonumber(config:get("Trading.MaxOffersPerCycle")) or 3
+		local sent = 0
+		for _, opp in ipairs(opportunities) do
+			if sent >= maxOffersPerCycle then break end
+			if opp.verdict == "GOOD DEAL" or opp.verdict == "GREAT DEAL" then
+				-- Generate offer combos from owned inventory
+				local res = offerAnalyzer:generateCandidates(opp.requestedItems or {})
+				if res and #res.candidates > 0 then
+					local best = res.candidates[1]
+					if gameAdapter and type(gameAdapter.sendOffer) == "function" then
+						local offerResult = gameAdapter.sendOffer(
+							opp.sellerId or "",
+							best.offeredPetIds or {},
+							opp.requestedItems or {}
+						)
+						if offerResult and offerResult.success then
+							sent += 1
+							offersSentThisSession += 1
+							tradeHistory:recordOfferSent({
+								targetPet = table.concat(opp.requestedItems or {}, ", "),
+								offeredPets = best.offeredPetIds or {},
+								profit = best.profit,
+								pctGain = best.pctGain,
+							})
+							eventBus:emit("offer:auto_sent", {
+								sellerId = opp.sellerId,
+								requestedItems = opp.requestedItems,
+								offeredPets = best.offeredPetIds,
+								profit = best.profit,
+							})
+							logger:info(string.format(
+								"[AutoLoop] Sent offer #%d (profit=+%.2f, +%.1f%%) for %s",
+								offersSentThisSession, best.profit or 0, best.pctGain or 0,
+								table.concat(opp.requestedItems or {}, "+")
+							))
+						end
+					else
+						-- No live offer remote — queue for manual review
+						offerQueue:addOffer({
+							targetPets   = opp.requestedItems or {},
+							offeredPets  = best.offeredPetIds or {},
+							profit       = best.profit,
+							pctGain      = best.pctGain,
+							sellerId     = opp.sellerId or "",
+						})
+					end
+				end
+			end
+		end
+
+		state:set("autoLoop.lastScanAt", lastAutoScanTime)
+		state:set("autoLoop.offersSentTotal", offersSentThisSession)
+		state:set("autoLoop.opportunitiesFound", #opportunities)
+	end
+
+	local scanInterval = tonumber(config:get("Trading.ScanIntervalSeconds")) or 15
+	scheduler:addJob("auto_trade_loop", scanInterval, runAutoTradeCycle)
+
+	-- expose toggle for UI
+	state:set("autoLoop.enabled", true)
+	state:set("autoLoop.offersSentTotal", 0)
+
 	if not env.skipInitialFetch and httpGet then
 		if type(task) == "table" and type(task.spawn) == "function" then
 			task.spawn(function()
@@ -6537,6 +7410,7 @@ function Bootstrap.createApp(requireRelative: (string) -> any, adapters: Environ
 			engine = valueEngine,
 			parser = ValueParser,
 			validator = ValueValidator,
+			csvLoader = csvLoader,
 		},
 		inventory = {
 			database = petDatabase,
@@ -6552,6 +7426,7 @@ function Bootstrap.createApp(requireRelative: (string) -> any, adapters: Environ
 			offerTimer = offerTimer,
 			offerQueue = offerQueue,
 			history = tradeHistory,
+			tradeHubAdapter = tradeHubAdapter,
 		},
 		kiria = kiria,
 		ui = {
@@ -6560,6 +7435,21 @@ function Bootstrap.createApp(requireRelative: (string) -> any, adapters: Environ
 			notifications = notifications,
 			pages = pages,
 			window = mainWindow,
+		},
+		autoLoop = {
+			getEnabled = function() return state:get("autoLoop.enabled") end,
+			setEnabled = function(v: boolean)
+				autoMode = v
+				state:set("autoLoop.enabled", v)
+				logger:info("[AutoLoop] " .. (v and "ENABLED" or "DISABLED"))
+			end,
+			getStats = function()
+				return {
+					offersSent = state:get("autoLoop.offersSentTotal") or 0,
+					lastScanAt = state:get("autoLoop.lastScanAt") or 0,
+					opportunities = state:get("autoLoop.opportunitiesFound") or 0,
+				}
+			end,
 		},
 	}
 
