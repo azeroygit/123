@@ -4213,6 +4213,17 @@ function Widgets.isRobloxGuiAvailable(): boolean
 	return type(Instance) == "table" or type(Instance) == "userdata"
 end
 
+function Widgets.clearChildren(container: any)
+	if not container then
+		return
+	end
+	for _, child in ipairs(container:GetChildren()) do
+		if not child:IsA("UILayout") and not child:IsA("UIPadding") then
+			child:Destroy()
+		end
+	end
+end
+
 function Widgets.createRoundedFrame(parent: any, props: {
 	name: string?,
 	size: any?,
@@ -4220,6 +4231,7 @@ function Widgets.createRoundedFrame(parent: any, props: {
 	bgColor: any?,
 	borderColor: any?,
 	cornerRadius: number?,
+	padding: number?,
 }): any
 	if not Widgets.isRobloxGuiAvailable() then
 		return nil
@@ -4245,7 +4257,48 @@ function Widgets.createRoundedFrame(parent: any, props: {
 		stroke.Parent = frame
 	end
 
+	if props.padding and props.padding > 0 then
+		local pad = Instance.new("UIPadding")
+		pad.PaddingTop = UDim.new(0, props.padding)
+		pad.PaddingBottom = UDim.new(0, props.padding)
+		pad.PaddingLeft = UDim.new(0, props.padding)
+		pad.PaddingRight = UDim.new(0, props.padding)
+		pad.Parent = frame
+	end
+
 	return frame
+end
+
+function Widgets.createScrollFrame(parent: any, props: {
+	name: string?,
+	size: any?,
+	position: any?,
+	bgColor: any?,
+	gap: number?,
+}): any
+	if not Widgets.isRobloxGuiAvailable() then
+		return nil
+	end
+	local sf = Instance.new("ScrollingFrame")
+	sf.Name = props.name or "Scroll"
+	sf.Size = props.size or UDim2.new(1, 0, 1, 0)
+	sf.Position = props.position or UDim2.new(0, 0, 0, 0)
+	sf.BackgroundColor3 = props.bgColor
+	sf.BackgroundTransparency = if props.bgColor then 0 else 1
+	sf.BorderSizePixel = 0
+	sf.ScrollBarThickness = 5
+	sf.CanvasSize = UDim2.new(0, 0, 0, 0)
+	sf.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	if parent then
+		sf.Parent = parent
+	end
+
+	local layout = Instance.new("UIListLayout")
+	layout.SortOrder = Enum.SortOrder.LayoutOrder
+	layout.Padding = UDim.new(0, props.gap or 8)
+	layout.Parent = sf
+
+	return sf
 end
 
 function Widgets.createButton(parent: any, props: {
@@ -4255,6 +4308,7 @@ function Widgets.createButton(parent: any, props: {
 	position: any?,
 	bgColor: any?,
 	textColor: any?,
+	textSize: number?,
 	onClick: () -> (),
 }): any
 	if not Widgets.isRobloxGuiAvailable() then
@@ -4273,7 +4327,7 @@ function Widgets.createButton(parent: any, props: {
 	btn.TextColor3 = props.textColor
 	btn.AutoButtonColor = true
 	btn.Font = Enum.Font.GothamSemibold
-	btn.TextSize = 13
+	btn.TextSize = props.textSize or 13
 	btn.BorderSizePixel = 0
 	if parent then
 		btn.Parent = parent
@@ -4285,6 +4339,65 @@ function Widgets.createButton(parent: any, props: {
 
 	btn.MouseButton1Click:Connect(props.onClick)
 	return btn
+end
+
+function Widgets.createTextBox(parent: any, props: {
+	name: string?,
+	text: string?,
+	placeholder: string?,
+	size: any?,
+	position: any?,
+	bgColor: any?,
+	textColor: any?,
+	placeholderColor: any?,
+	borderColor: any?,
+	onFocusLost: ((string, boolean) -> ())?,
+}): any
+	if not Widgets.isRobloxGuiAvailable() then
+		return { Text = props.text or "" }
+	end
+	local tb = Instance.new("TextBox")
+	tb.Name = props.name or "Input"
+	tb.Text = props.text or ""
+	tb.PlaceholderText = props.placeholder or ""
+	tb.Size = props.size or UDim2.new(0, 200, 0, 32)
+	tb.Position = props.position or UDim2.new(0, 0, 0, 0)
+	tb.BackgroundColor3 = props.bgColor
+	tb.TextColor3 = props.textColor
+	if props.placeholderColor then
+		tb.PlaceholderColor3 = props.placeholderColor
+	end
+	tb.Font = Enum.Font.Gotham
+	tb.TextSize = 13
+	tb.TextXAlignment = Enum.TextXAlignment.Left
+	tb.ClearTextOnFocus = false
+	tb.BorderSizePixel = 0
+	if parent then
+		tb.Parent = parent
+	end
+
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 6)
+	corner.Parent = tb
+
+	local pad = Instance.new("UIPadding")
+	pad.PaddingLeft = UDim.new(0, 8)
+	pad.PaddingRight = UDim.new(0, 8)
+	pad.Parent = tb
+
+	if props.borderColor then
+		local stroke = Instance.new("UIStroke")
+		stroke.Color = props.borderColor
+		stroke.Thickness = 1
+		stroke.Parent = tb
+	end
+
+	if props.onFocusLost then
+		tb.FocusLost:Connect(function(enterPressed)
+			props.onFocusLost(tb.Text, enterPressed)
+		end)
+	end
+	return tb
 end
 
 function Widgets.createLabel(parent: any, props: {
@@ -4313,6 +4426,98 @@ function Widgets.createLabel(parent: any, props: {
 		lbl.Parent = parent
 	end
 	return lbl
+end
+
+function Widgets.createStatCard(parent: any, props: {
+	title: string,
+	value: string,
+	subtitle: string?,
+	size: any?,
+	position: any?,
+	bgColor: any?,
+	borderColor: any?,
+	titleColor: any?,
+	valueColor: any?,
+}): any
+	if not Widgets.isRobloxGuiAvailable() then
+		return nil
+	end
+	local card = Widgets.createRoundedFrame(parent, {
+		name = "Stat_" .. props.title,
+		size = props.size or UDim2.new(0.24, -6, 0, 68),
+		position = props.position,
+		bgColor = props.bgColor,
+		borderColor = props.borderColor,
+		cornerRadius = 8,
+		padding = 8,
+	})
+	Widgets.createLabel(card, {
+		text = props.title,
+		size = UDim2.new(1, 0, 0, 16),
+		textColor = props.titleColor,
+		textSize = 11,
+	})
+	Widgets.createLabel(card, {
+		text = props.value,
+		position = UDim2.new(0, 0, 0, 18),
+		size = UDim2.new(1, 0, 0, 22),
+		textColor = props.valueColor,
+		textSize = 16,
+		bold = true,
+	})
+	if props.subtitle then
+		Widgets.createLabel(card, {
+			text = props.subtitle,
+			position = UDim2.new(0, 0, 0, 40),
+			size = UDim2.new(1, 0, 0, 14),
+			textColor = props.titleColor,
+			textSize = 10,
+		})
+	end
+	return card
+end
+
+function Widgets.makeDraggable(targetFrame: any, handle: any): { any }
+	if not Widgets.isRobloxGuiAvailable() then
+		return {}
+	end
+	local conns = {}
+	local dragging = false
+	local dragStart: any = nil
+	local startPos: any = nil
+
+	table.insert(conns, handle.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = true
+			dragStart = input.Position
+			startPos = targetFrame.Position
+		end
+	end))
+
+	table.insert(conns, handle.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = false
+		end
+	end))
+
+	local okUis, UserInputService = pcall(function()
+		return game:GetService("UserInputService")
+	end)
+	if okUis and UserInputService then
+		table.insert(conns, UserInputService.InputChanged:Connect(function(input)
+			if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+				local delta = input.Position - dragStart
+				targetFrame.Position = UDim2.new(
+					startPos.X.Scale,
+					startPos.X.Offset + delta.X,
+					startPos.Y.Scale,
+					startPos.Y.Offset + delta.Y
+				)
+			end
+		end))
+	end
+
+	return conns
 end
 
 return Widgets
@@ -4425,7 +4630,8 @@ __moduleSources["UI/Dashboard"] = function(...)
 --[[
 	Dashboard.luau
 	Overview page: inventory value, best pet, AMVGG status + refresh,
-	scanned listings, good deals, pending offers, confirmed profit, and Kiria card.
+	scanned listings, good deals, pending offers, confirmed profit, quick pet lookup,
+	and Kiria companion card.
 ]]
 
 local Dashboard = {}
@@ -4446,6 +4652,7 @@ function Dashboard.new(deps: {
 	self._offerQueue = deps.offerQueue
 	self._history = deps.tradeHistory
 	self._kiria = deps.kiria
+	self._lookupQuery = "Shadow Dragon"
 	return self
 end
 
@@ -4485,37 +4692,177 @@ function Dashboard:refreshAmvgg(): (boolean, string?)
 	return self._amvgg:refresh({ force = true })
 end
 
-function Dashboard:render(container: any, theme: any, widgets: any)
+function Dashboard:render(container: any, theme: any, widgets: any, navigateFn: ((string) -> ())?)
 	if not (container and widgets and widgets.isRobloxGuiAvailable()) then
 		return
 	end
-	for _, child in ipairs(container:GetChildren()) do
-		child:Destroy()
-	end
+	widgets.clearChildren(container)
 	local vm = self:getViewModel()
+	local cText = theme.toColor3(theme.Colors.TextPrimary)
+	local cMuted = theme.toColor3(theme.Colors.TextMuted)
+	local cCard = theme.toColor3(theme.Colors.SurfaceAlt)
+	local cBorder = theme.toColor3(theme.Colors.Border)
+	local cProfit = theme.toColor3(theme.Colors.Profit)
+	local cAccent = theme.toColor3(theme.Colors.Accent)
+	local cBright = theme.toColor3(theme.Colors.AccentBright)
+
 	widgets.createLabel(container, {
-		text = string.format("Dashboard  |  Inventory: %.2f AMVGG  |  Confirmed Profit: %+.2f  |  AMVGG: %s (%d pets)",
-			vm.inventoryValue, vm.confirmedProfit, vm.amvgg.status, vm.amvgg.petCount),
-		textColor = theme.toColor3(theme.Colors.TextPrimary),
+		text = "Dashboard Overview",
+		size = UDim2.new(1, -150, 0, 24),
+		textColor = cText,
+		textSize = 18,
 		bold = true,
 	})
+
 	widgets.createButton(container, {
 		text = "Refresh AMVGG",
-		position = UDim2.new(0, 0, 0, 32),
-		bgColor = theme.toColor3(theme.Colors.Accent),
-		textColor = theme.toColor3(theme.Colors.TextPrimary),
+		size = UDim2.new(0, 140, 0, 30),
+		position = UDim2.new(1, -140, 0, 0),
+		bgColor = cAccent,
+		textColor = cText,
 		onClick = function()
 			self:refreshAmvgg()
 		end,
 	})
-	if vm.kiria and vm.kiria.latestMessage then
-		widgets.createLabel(container, {
-			text = string.format("Kiria (%s • %s): %s", vm.kiria.rank, vm.kiria.mood, vm.kiria.latestMessage),
-			position = UDim2.new(0, 0, 0, 76),
-			size = UDim2.new(1, 0, 0, 48),
-			textColor = theme.toColor3(theme.Colors.AccentBright),
-		})
-	end
+
+	-- Row 1 of Stat Cards
+	local bestName = if vm.bestPet then vm.bestPet.pet.name else "None"
+	local bestVal = if vm.bestPet then string.format("%.2f", vm.bestPet.value) else "0.00"
+
+	widgets.createStatCard(container, {
+		title = "INVENTORY VALUE",
+		value = string.format("%.2f", vm.inventoryValue),
+		subtitle = "AMVGG Total",
+		position = UDim2.new(0, 0, 0, 40),
+		bgColor = cCard, borderColor = cBorder, titleColor = cMuted, valueColor = cText,
+	})
+	widgets.createStatCard(container, {
+		title = "TOP PET",
+		value = bestName,
+		subtitle = bestVal .. " AMVGG",
+		position = UDim2.new(0.25, 4, 0, 40),
+		bgColor = cCard, borderColor = cBorder, titleColor = cMuted, valueColor = cBright,
+	})
+	widgets.createStatCard(container, {
+		title = "AMVGG FEED",
+		value = string.format("%s (%d)", vm.amvgg.status, vm.amvgg.petCount),
+		subtitle = if vm.amvgg.isStale then "Cached Fallback" else "amvgg.com/values/pets",
+		position = UDim2.new(0.50, 8, 0, 40),
+		bgColor = cCard, borderColor = cBorder, titleColor = cMuted,
+		valueColor = if vm.amvgg.status == "LIVE" then cProfit else theme.toColor3(theme.Colors.Warning),
+	})
+	widgets.createStatCard(container, {
+		title = "CONFIRMED PROFIT",
+		value = string.format("%+.2f", vm.confirmedProfit),
+		subtitle = string.format("Pending: %+.2f", vm.pendingProfit),
+		position = UDim2.new(0.75, 12, 0, 40),
+		bgColor = cCard, borderColor = cBorder, titleColor = cMuted, valueColor = cProfit,
+	})
+
+	-- Row 2 of Stat Cards
+	widgets.createStatCard(container, {
+		title = "SCANNED LISTINGS",
+		value = tostring(vm.scannedListings),
+		subtitle = "Hub & Imported",
+		position = UDim2.new(0, 0, 0, 118),
+		bgColor = cCard, borderColor = cBorder, titleColor = cMuted, valueColor = cText,
+	})
+	widgets.createStatCard(container, {
+		title = "GOOD DEALS",
+		value = tostring(vm.goodDeals),
+		subtitle = "Ranked Opportunities",
+		position = UDim2.new(0.25, 4, 0, 118),
+		bgColor = cCard, borderColor = cBorder, titleColor = cMuted, valueColor = cProfit,
+	})
+	widgets.createStatCard(container, {
+		title = "PENDING OFFERS",
+		value = tostring(vm.pendingOffers),
+		subtitle = "Awaiting Response",
+		position = UDim2.new(0.50, 8, 0, 118),
+		bgColor = cCard, borderColor = cBorder, titleColor = cMuted, valueColor = cText,
+	})
+	widgets.createStatCard(container, {
+		title = "KIRIA RANK",
+		value = vm.kiria.rank,
+		subtitle = string.format("%d XP • %s", vm.kiria.xp, vm.kiria.mood),
+		position = UDim2.new(0.75, 12, 0, 118),
+		bgColor = cCard, borderColor = cBorder, titleColor = cMuted, valueColor = cBright,
+	})
+
+	-- Quick AMVGG Pet Lookup Card
+	local lookupCard = widgets.createRoundedFrame(container, {
+		name = "QuickLookup",
+		size = UDim2.new(1, 0, 0, 110),
+		position = UDim2.new(0, 0, 0, 198),
+		bgColor = cCard,
+		borderColor = cBorder,
+		cornerRadius = 8,
+		padding = 10,
+	})
+	widgets.createLabel(lookupCard, {
+		text = "Quick AMVGG Pet Value Lookup",
+		size = UDim2.new(0.5, 0, 0, 20),
+		textColor = cText,
+		bold = true,
+	})
+	widgets.createTextBox(lookupCard, {
+		text = self._lookupQuery,
+		placeholder = "Type pet name (e.g. Shadow Dragon)...",
+		size = UDim2.new(0, 240, 0, 30),
+		position = UDim2.new(0, 0, 0, 26),
+		bgColor = theme.toColor3(theme.Colors.Background),
+		textColor = cText,
+		placeholderColor = cMuted,
+		borderColor = cBorder,
+		onFocusLost = function(txt)
+			self._lookupQuery = txt
+			self:render(container, theme, widgets, navigateFn)
+		end,
+	})
+
+	local petRec = self._invValuator._valueEngine._cache:getPet(self._lookupQuery)
+	local lookupText = if petRec
+		then string.format(
+			"%s  |  FR: %s  |  No-Pot: %s  |  NFR: %s  |  MFR: %s  |  Demand: %s",
+			petRec.name,
+			tostring(petRec.values.regular or "-"),
+			tostring(petRec.values.npRegular or "-"),
+			tostring(petRec.values.neon or "-"),
+			tostring(petRec.values.mega or "-"),
+			tostring(petRec.demands.regular or "N/A")
+		)
+		else "Pet not found in AMVGG dataset (press Enter after typing)."
+	widgets.createLabel(lookupCard, {
+		text = lookupText,
+		position = UDim2.new(0, 0, 0, 64),
+		size = UDim2.new(1, 0, 0, 24),
+		textColor = if petRec then cProfit else cMuted,
+		textSize = 13,
+	})
+
+	-- Kiria Companion Card
+	local kiriaCard = widgets.createRoundedFrame(container, {
+		name = "KiriaCard",
+		size = UDim2.new(1, 0, 0, 130),
+		position = UDim2.new(0, 0, 0, 320),
+		bgColor = cCard,
+		borderColor = cAccent,
+		cornerRadius = 8,
+		padding = 12,
+	})
+	widgets.createLabel(kiriaCard, {
+		text = string.format("Kiria Companion  •  %s (%s)", vm.kiria.rank, vm.kiria.mood),
+		size = UDim2.new(1, 0, 0, 20),
+		textColor = cBright,
+		bold = true,
+	})
+	widgets.createLabel(kiriaCard, {
+		text = vm.kiria.latestMessage or "Ready at the Trade Hub terminal.",
+		position = UDim2.new(0, 0, 0, 28),
+		size = UDim2.new(1, 0, 0, 74),
+		textColor = cText,
+		textSize = 13,
+	})
 end
 
 return Dashboard
@@ -4537,6 +4884,9 @@ function ListingsPage.new(deps: { listingScanner: any, listingManager: any, inve
 	self._manager = deps.listingManager
 	self._inventory = deps.inventoryReader
 	self._filters = { petQuery = "", minProfit = 0, minPctGain = 0, includeIncomplete = false }
+	self._manualOfferName = ""
+	self._manualAskName = ""
+	self._statusMsg = ""
 	return self
 end
 
@@ -4576,24 +4926,128 @@ function ListingsPage:render(container: any, theme: any, widgets: any)
 	if not (container and widgets and widgets.isRobloxGuiAvailable()) then
 		return
 	end
-	for _, child in ipairs(container:GetChildren()) do
-		child:Destroy()
-	end
+	widgets.clearChildren(container)
 	local opps = self:getScannedListings()
+	local managed = self._manager:getAll()
+	local cText = theme.toColor3(theme.Colors.TextPrimary)
+	local cMuted = theme.toColor3(theme.Colors.TextMuted)
+	local cCard = theme.toColor3(theme.Colors.SurfaceAlt)
+	local cBorder = theme.toColor3(theme.Colors.Border)
+	local cAccent = theme.toColor3(theme.Colors.Accent)
+	local cProfit = theme.toColor3(theme.Colors.Profit)
+	local cWarn = theme.toColor3(theme.Colors.Warning)
+
 	widgets.createLabel(container, {
-		text = string.format("Listings Scanner (%d opportunities) & Active Listings (%d)", #opps, #self._manager:getActive()),
-		textColor = theme.toColor3(theme.Colors.TextPrimary),
+		text = string.format("Listings Scanner (%d opportunities) & My Listings (%d)", #opps, #managed),
+		size = UDim2.new(1, -130, 0, 22),
+		textColor = cText,
+		textSize = 15,
 		bold = true,
 	})
+
 	widgets.createButton(container, {
 		text = "Scan Hub Now",
-		position = UDim2.new(0, 0, 0, 32),
-		bgColor = theme.toColor3(theme.Colors.Accent),
-		textColor = theme.toColor3(theme.Colors.TextPrimary),
+		size = UDim2.new(0, 120, 0, 28),
+		position = UDim2.new(1, -120, 0, 0),
+		bgColor = cAccent,
+		textColor = cText,
 		onClick = function()
-			self:scanNow()
+			local res = self:scanNow()
+			self._statusMsg = res.warning or string.format("Scanned %d listings (%d good deals)", res.total, res.goodDeals)
+			self:render(container, theme, widgets)
 		end,
 	})
+
+	-- Manual Listing Ingestion Bar (evaluate any Hub listing manually)
+	widgets.createTextBox(container, {
+		text = self._manualOfferName,
+		placeholder = "They offer (e.g. Frost Dragon)",
+		size = UDim2.new(0, 200, 0, 28),
+		position = UDim2.new(0, 0, 0, 34),
+		bgColor = theme.toColor3(theme.Colors.Background),
+		textColor = cText,
+		placeholderColor = cMuted,
+		borderColor = cBorder,
+		onFocusLost = function(txt) self._manualOfferName = txt end,
+	})
+	widgets.createTextBox(container, {
+		text = self._manualAskName,
+		placeholder = "They ask (e.g. Shadow Dragon)",
+		size = UDim2.new(0, 200, 0, 28),
+		position = UDim2.new(0, 208, 0, 34),
+		bgColor = theme.toColor3(theme.Colors.Background),
+		textColor = cText,
+		placeholderColor = cMuted,
+		borderColor = cBorder,
+		onFocusLost = function(txt) self._manualAskName = txt end,
+	})
+	widgets.createButton(container, {
+		text = "+ Evaluate Listing",
+		size = UDim2.new(0, 130, 0, 28),
+		position = UDim2.new(0, 416, 0, 34),
+		bgColor = cProfit,
+		textColor = cText,
+		onClick = function()
+			if self._manualOfferName ~= "" and self._manualAskName ~= "" then
+				self._scanner:ingestListing({
+					offeredItems = { { name = self._manualOfferName, fly = true, ride = true } },
+					requestedItems = { { name = self._manualAskName, fly = true, ride = true } },
+				}, "manual")
+				self._statusMsg = "Evaluated manual listing"
+				self:render(container, theme, widgets)
+			end
+		end,
+	})
+
+	if self._statusMsg ~= "" then
+		widgets.createLabel(container, {
+			text = self._statusMsg,
+			position = UDim2.new(0, 0, 0, 68),
+			size = UDim2.new(1, 0, 0, 18),
+			textColor = cWarn,
+			textSize = 11,
+		})
+	end
+
+	local scroll = widgets.createScrollFrame(container, {
+		size = UDim2.new(1, 0, 1, -94),
+		position = UDim2.new(0, 0, 0, 90),
+		gap = 6,
+	})
+
+	if #opps == 0 then
+		widgets.createLabel(scroll, {
+			text = "No listings scanned yet. Click 'Scan Hub Now' or enter a listing above to evaluate AMVGG profit.",
+			textColor = cMuted,
+		})
+	else
+		for _, item in ipairs(opps) do
+			local card = widgets.createRoundedFrame(scroll, {
+				size = UDim2.new(1, -8, 0, 56),
+				bgColor = cCard,
+				borderColor = if item.listingStatus == "GOOD DEAL" then cProfit else cBorder,
+				cornerRadius = 6,
+				padding = 8,
+			})
+			local offName = item.offeredItems[1] and item.offeredItems[1].name or "?"
+			local reqName = item.requestedItems[1] and item.requestedItems[1].name or "?"
+			widgets.createLabel(card, {
+				text = string.format("[%s]  Get: %s (%.2f)  |  Give: %s (%.2f)  |  %+.2f (%+.1f%%)",
+					item.listingStatus, offName, item.totalAmvggOffered, reqName, item.totalAmvggRequested, item.estimatedProfit, item.profitPercent),
+				size = UDim2.new(1, 0, 0, 20),
+				textColor = if item.estimatedProfit >= 0 then cProfit else theme.toColor3(theme.Colors.Loss),
+				textSize = 12,
+				bold = true,
+			})
+			widgets.createLabel(card, {
+				text = string.format("Risk: %d/100  •  %s", item.riskScore, item.liquidityNote),
+				position = UDim2.new(0, 0, 0, 22),
+				size = UDim2.new(1, 0, 0, 18),
+				textColor = cMuted,
+				textSize = 11,
+			})
+		end
+	end
 end
 
 return ListingsPage
@@ -4616,6 +5070,8 @@ function OffersPage.new(deps: { offerAnalyzer: any, offerQueue: any, tradeHistor
 	self._queue = deps.offerQueue
 	self._history = deps.tradeHistory
 	self._lastCandidates = {} :: { any }
+	self._targetPetName = "Frost Dragon"
+	self._statusMsg = ""
 	return self
 end
 
@@ -4686,14 +5142,157 @@ function OffersPage:render(container: any, theme: any, widgets: any)
 	if not (container and widgets and widgets.isRobloxGuiAvailable()) then
 		return
 	end
-	for _, child in ipairs(container:GetChildren()) do
-		child:Destroy()
-	end
+	widgets.clearChildren(container)
+	local cText = theme.toColor3(theme.Colors.TextPrimary)
+	local cMuted = theme.toColor3(theme.Colors.TextMuted)
+	local cCard = theme.toColor3(theme.Colors.SurfaceAlt)
+	local cBorder = theme.toColor3(theme.Colors.Border)
+	local cAccent = theme.toColor3(theme.Colors.Accent)
+	local cProfit = theme.toColor3(theme.Colors.Profit)
+	local cLoss = theme.toColor3(theme.Colors.Loss)
+
 	widgets.createLabel(container, {
-		text = string.format("Offers Queue (%d pending)  |  Generated Candidates: %d", self._queue:getPendingCount(), #self._lastCandidates),
-		textColor = theme.toColor3(theme.Colors.TextPrimary),
+		text = string.format("Offers Engine & Queue (%d pending  |  %d candidates)", self._queue:getPendingCount(), #self._lastCandidates),
+		size = UDim2.new(1, 0, 0, 22),
+		textColor = cText,
+		textSize = 15,
 		bold = true,
 	})
+
+	widgets.createTextBox(container, {
+		text = self._targetPetName,
+		placeholder = "Target pet (e.g. Frost Dragon)...",
+		size = UDim2.new(0, 220, 0, 30),
+		position = UDim2.new(0, 0, 0, 32),
+		bgColor = theme.toColor3(theme.Colors.Background),
+		textColor = cText,
+		placeholderColor = cMuted,
+		borderColor = cBorder,
+		onFocusLost = function(txt) self._targetPetName = txt end,
+	})
+
+	widgets.createButton(container, {
+		text = "Generate Offers",
+		size = UDim2.new(0, 140, 0, 30),
+		position = UDim2.new(0, 228, 0, 32),
+		bgColor = cAccent,
+		textColor = cText,
+		onClick = function()
+			local res = self:generateForTarget({ { name = self._targetPetName, fly = true, ride = true } })
+			self._statusMsg = res.reason or string.format("Generated %d profit-positive candidates", #res.candidates)
+			self:render(container, theme, widgets)
+		end,
+	})
+
+	if self._statusMsg ~= "" then
+		widgets.createLabel(container, {
+			text = self._statusMsg,
+			position = UDim2.new(0, 378, 0, 36),
+			size = UDim2.new(1, -378, 0, 22),
+			textColor = cMuted,
+			textSize = 11,
+		})
+	end
+
+	local scroll = widgets.createScrollFrame(container, {
+		size = UDim2.new(1, 0, 1, -74),
+		position = UDim2.new(0, 0, 0, 70),
+		gap = 6,
+	})
+
+	for idx, cand in ipairs(self._lastCandidates) do
+		local row = widgets.createRoundedFrame(scroll, {
+			size = UDim2.new(1, -8, 0, 50),
+			bgColor = cCard,
+			borderColor = cAccent,
+			cornerRadius = 6,
+			padding = 8,
+		})
+		local names = {}
+		for _, p in ipairs(cand.offeredPets) do
+			table.insert(names, p.name)
+		end
+		widgets.createLabel(row, {
+			text = string.format("Candidate #%d: Offer %s (%.2f) -> %.2f  |  %+.2f (%+.1f%%)",
+				idx, table.concat(names, " + "), cand.offeredValue, cand.targetValue, cand.profitValue, cand.profitPercent),
+			size = UDim2.new(1, -110, 0, 32),
+			textColor = cProfit,
+			textSize = 12,
+		})
+		widgets.createButton(row, {
+			text = "Queue Offer",
+			size = UDim2.new(0, 100, 0, 28),
+			position = UDim2.new(1, -100, 0, 2),
+			bgColor = cAccent,
+			textColor = cText,
+			onClick = function()
+				local _, err = self:queueCandidate(cand)
+				self._statusMsg = err or "Offer queued for confirmation"
+				self:render(container, theme, widgets)
+			end,
+		})
+	end
+
+	local offers = self._queue:getAll()
+	if #offers == 0 and #self._lastCandidates == 0 then
+		widgets.createLabel(scroll, {
+			text = "No queued offers yet. Add pets in Inventory, then enter a target pet above and click 'Generate Offers'.",
+			textColor = cMuted,
+		})
+		return
+	end
+
+	for _, off in ipairs(offers) do
+		local row = widgets.createRoundedFrame(scroll, {
+			size = UDim2.new(1, -8, 0, 48),
+			bgColor = cCard,
+			borderColor = cBorder,
+			cornerRadius = 6,
+			padding = 8,
+		})
+		widgets.createLabel(row, {
+			text = string.format("[%s] %s  |  Profit: %+.2f (%+.1f%%)",
+				off.status, off.offerId, off.profitValue, off.profitPercent),
+			size = UDim2.new(1, -220, 0, 28),
+			textColor = cText,
+			textSize = 12,
+		})
+		if off.status == "PENDING" then
+			widgets.createButton(row, {
+				text = "Confirm",
+				size = UDim2.new(0, 72, 0, 26),
+				position = UDim2.new(1, -214, 0, 2),
+				bgColor = cProfit,
+				textColor = cText,
+				onClick = function()
+					self:confirmAcceptOffer(off.offerId, true)
+					self:render(container, theme, widgets)
+				end,
+			})
+			widgets.createButton(row, {
+				text = "Decline",
+				size = UDim2.new(0, 68, 0, 26),
+				position = UDim2.new(1, -138, 0, 2),
+				bgColor = cLoss,
+				textColor = cText,
+				onClick = function()
+					self:declineOffer(off.offerId)
+					self:render(container, theme, widgets)
+				end,
+			})
+			widgets.createButton(row, {
+				text = "Cancel",
+				size = UDim2.new(0, 64, 0, 26),
+				position = UDim2.new(1, -66, 0, 2),
+				bgColor = theme.toColor3(theme.Colors.Background),
+				textColor = cText,
+				onClick = function()
+					self:cancelOffer(off.offerId)
+					self:render(container, theme, widgets)
+				end,
+			})
+		end
+	end
 end
 
 return OffersPage
@@ -4704,7 +5303,7 @@ __moduleSources["UI/InventoryPage"] = function(...)
 --[[
 	InventoryPage.luau
 	Inventory search, filtering, AMVGG valuation sorting, top pet highlight,
-	listing selection, manual editing, JSON import/export, and game sync.
+	manual pet editor, JSON import/export, and game sync.
 ]]
 
 local InventoryPage = {}
@@ -4723,6 +5322,12 @@ function InventoryPage.new(deps: { inventoryReader: any, inventoryValuator: any 
 		tradeableOnly = false,
 		sortDescending = true,
 	}
+	self._draftName = ""
+	self._draftN = false
+	self._draftM = false
+	self._draftF = true
+	self._draftR = true
+	self._statusMsg = ""
 	return self
 end
 
@@ -4768,17 +5373,174 @@ function InventoryPage:render(container: any, theme: any, widgets: any)
 	if not (container and widgets and widgets.isRobloxGuiAvailable()) then
 		return
 	end
-	for _, child in ipairs(container:GetChildren()) do
-		child:Destroy()
-	end
+	widgets.clearChildren(container)
 	local vm = self:getViewModel()
+	local cText = theme.toColor3(theme.Colors.TextPrimary)
+	local cMuted = theme.toColor3(theme.Colors.TextMuted)
+	local cCard = theme.toColor3(theme.Colors.SurfaceAlt)
+	local cBorder = theme.toColor3(theme.Colors.Border)
+	local cAccent = theme.toColor3(theme.Colors.Accent)
+	local cProfit = theme.toColor3(theme.Colors.Profit)
+	local cLoss = theme.toColor3(theme.Colors.Loss)
+
 	local topName = if vm.topPet then vm.topPet.pet.name else "None"
 	local topVal = if vm.topPet then vm.topPet.value else 0
 	widgets.createLabel(container, {
-		text = string.format("Inventory (%d pets)  |  Total AMVGG: %.2f  |  Top Pet: %s (%.2f)", vm.totalCount, vm.totalValue, topName, topVal),
-		textColor = theme.toColor3(theme.Colors.TextPrimary),
+		text = string.format("Inventory (%d pets)  |  Total AMVGG: %.2f  |  Top: %s (%.2f)", vm.totalCount, vm.totalValue, topName, topVal),
+		size = UDim2.new(1, -120, 0, 22),
+		textColor = cText,
+		textSize = 15,
 		bold = true,
 	})
+
+	widgets.createButton(container, {
+		text = "Sync Game",
+		size = UDim2.new(0, 110, 0, 28),
+		position = UDim2.new(1, -110, 0, 0),
+		bgColor = cCard,
+		textColor = cText,
+		onClick = function()
+			local _, err = self:syncFromGame()
+			self._statusMsg = err or "Synced from game"
+			self:render(container, theme, widgets)
+		end,
+	})
+
+	-- Manual Add Pet Bar
+	widgets.createTextBox(container, {
+		text = self._draftName,
+		placeholder = "Add pet name (e.g. Frost Dragon)...",
+		size = UDim2.new(0, 220, 0, 30),
+		position = UDim2.new(0, 0, 0, 34),
+		bgColor = theme.toColor3(theme.Colors.Background),
+		textColor = cText,
+		placeholderColor = cMuted,
+		borderColor = cBorder,
+		onFocusLost = function(txt)
+			self._draftName = txt
+		end,
+	})
+
+	local function flagBtn(label: string, active: boolean, x: number, toggleFn: () -> ())
+		widgets.createButton(container, {
+			text = label,
+			size = UDim2.new(0, 34, 0, 30),
+			position = UDim2.new(0, x, 0, 34),
+			bgColor = if active then cAccent else cCard,
+			textColor = cText,
+			onClick = function()
+				toggleFn()
+				self:render(container, theme, widgets)
+			end,
+		})
+	end
+	flagBtn("N", self._draftN, 226, function() self._draftN = not self._draftN end)
+	flagBtn("M", self._draftM, 264, function() self._draftM = not self._draftM end)
+	flagBtn("F", self._draftF, 302, function() self._draftF = not self._draftF end)
+	flagBtn("R", self._draftR, 340, function() self._draftR = not self._draftR end)
+
+	widgets.createButton(container, {
+		text = "+ Add Pet",
+		size = UDim2.new(0, 96, 0, 30),
+		position = UDim2.new(0, 382, 0, 34),
+		bgColor = cProfit,
+		textColor = cText,
+		onClick = function()
+			if self._draftName ~= "" then
+				self:addPet({
+					name = self._draftName,
+					neon = self._draftN,
+					mega = self._draftM,
+					fly = self._draftF,
+					ride = self._draftR,
+				})
+				self._draftName = ""
+				self._statusMsg = "Added pet to inventory"
+				self:render(container, theme, widgets)
+			end
+		end,
+	})
+
+	-- Search & Status
+	widgets.createTextBox(container, {
+		text = self._filter.query,
+		placeholder = "Search inventory...",
+		size = UDim2.new(0, 220, 0, 28),
+		position = UDim2.new(0, 0, 0, 72),
+		bgColor = theme.toColor3(theme.Colors.Background),
+		textColor = cText,
+		placeholderColor = cMuted,
+		borderColor = cBorder,
+		onFocusLost = function(txt)
+			self:setFilter({ query = txt })
+			self:render(container, theme, widgets)
+		end,
+	})
+
+	if self._statusMsg ~= "" then
+		widgets.createLabel(container, {
+			text = self._statusMsg,
+			position = UDim2.new(0, 230, 0, 75),
+			size = UDim2.new(1, -230, 0, 22),
+			textColor = cMuted,
+			textSize = 11,
+		})
+	end
+
+	local scroll = widgets.createScrollFrame(container, {
+		size = UDim2.new(1, 0, 1, -110),
+		position = UDim2.new(0, 0, 0, 108),
+		gap = 6,
+	})
+
+	if #vm.items == 0 then
+		widgets.createLabel(scroll, {
+			text = "Inventory is empty. Add pets above using their AMVGG name (e.g. Shadow Dragon, Turtle, Cow).",
+			textColor = cMuted,
+		})
+		return
+	end
+
+	for _, entry in ipairs(vm.items) do
+		local pet = entry.pet
+		local ev = entry.evaluation
+		local row = widgets.createRoundedFrame(scroll, {
+			size = UDim2.new(1, -8, 0, 42),
+			bgColor = cCard,
+			borderColor = if pet.locked then theme.toColor3(theme.Colors.Warning) else cBorder,
+			cornerRadius = 6,
+			padding = 8,
+		})
+		local valStr = if ev.complete then string.format("%.2f", entry.value) else "INCOMPLETE"
+		widgets.createLabel(row, {
+			text = string.format("%s [%s]  •  %s AMVGG%s", pet.name, ev.variantLabel, valStr, if pet.locked then "  (LOCKED)" else ""),
+			size = UDim2.new(1, -150, 0, 24),
+			textColor = if ev.complete then cText else theme.toColor3(theme.Colors.Warning),
+			textSize = 13,
+		})
+		widgets.createButton(row, {
+			text = if pet.locked then "Unlock" else "Lock",
+			size = UDim2.new(0, 64, 0, 26),
+			position = UDim2.new(1, -138, 0, 0),
+			bgColor = theme.toColor3(theme.Colors.Background),
+			textColor = cText,
+			onClick = function()
+				self:toggleLock(pet.uid, not pet.locked)
+				self:render(container, theme, widgets)
+			end,
+		})
+		widgets.createButton(row, {
+			text = "Remove",
+			size = UDim2.new(0, 68, 0, 26),
+			position = UDim2.new(1, -68, 0, 0),
+			bgColor = cLoss,
+			textColor = cText,
+			onClick = function()
+				self:removePet(pet.uid)
+				self:render(container, theme, widgets)
+			end,
+		})
+	end
 end
 
 return InventoryPage
@@ -4789,7 +5551,7 @@ __moduleSources["UI/AnalyticsPage"] = function(...)
 --[[
 	AnalyticsPage.luau
 	Displays inspected listings, good deals, offer outcomes, Potential vs Pending
-	vs Confirmed Profit, acceptance rate, best/worst trade, and chart series.
+	vs Confirmed Profit, acceptance rate, best/worst trade, and visual bar charts.
 ]]
 
 local AnalyticsPage = {}
@@ -4836,18 +5598,106 @@ function AnalyticsPage:render(container: any, theme: any, widgets: any)
 	if not (container and widgets and widgets.isRobloxGuiAvailable()) then
 		return
 	end
-	for _, child in ipairs(container:GetChildren()) do
-		child:Destroy()
-	end
+	widgets.clearChildren(container)
 	local vm = self:getViewModel()
+	local cText = theme.toColor3(theme.Colors.TextPrimary)
+	local cMuted = theme.toColor3(theme.Colors.TextMuted)
+	local cCard = theme.toColor3(theme.Colors.SurfaceAlt)
+	local cBorder = theme.toColor3(theme.Colors.Border)
+	local cProfit = theme.toColor3(theme.Colors.Profit)
+	local cWarn = theme.toColor3(theme.Colors.Warning)
+	local cAccent = theme.toColor3(theme.Colors.Accent)
+
 	widgets.createLabel(container, {
-		text = string.format(
-			"Analytics  |  Confirmed: %+.2f  |  Pending: %+.2f  |  Potential: %+.2f  |  Accept Rate: %.1f%%",
-			vm.confirmedProfit, vm.pendingProfit, vm.potentialProfit, vm.acceptanceRate
-		),
-		textColor = theme.toColor3(theme.Colors.TextPrimary),
+		text = "Trading Analytics & Profit Breakdown",
+		size = UDim2.new(1, 0, 0, 24),
+		textColor = cText,
+		textSize = 17,
 		bold = true,
 	})
+
+	widgets.createStatCard(container, {
+		title = "CONFIRMED PROFIT",
+		value = string.format("%+.2f", vm.confirmedProfit),
+		subtitle = "Verified Trades Only",
+		position = UDim2.new(0, 0, 0, 34),
+		bgColor = cCard, borderColor = cProfit, titleColor = cMuted, valueColor = cProfit,
+	})
+	widgets.createStatCard(container, {
+		title = "PENDING PROFIT",
+		value = string.format("%+.2f", vm.pendingProfit),
+		subtitle = "Awaiting Response",
+		position = UDim2.new(0.25, 4, 0, 34),
+		bgColor = cCard, borderColor = cBorder, titleColor = cMuted, valueColor = cWarn,
+	})
+	widgets.createStatCard(container, {
+		title = "POTENTIAL PROFIT",
+		value = string.format("%+.2f", vm.potentialProfit),
+		subtitle = "Scanned Good Deals",
+		position = UDim2.new(0.50, 8, 0, 34),
+		bgColor = cCard, borderColor = cBorder, titleColor = cMuted, valueColor = cAccent,
+	})
+	widgets.createStatCard(container, {
+		title = "ACCEPTANCE RATE",
+		value = string.format("%.1f%%", vm.acceptanceRate),
+		subtitle = string.format("Avg: %+.2f AMVGG", vm.averageProfit),
+		position = UDim2.new(0.75, 12, 0, 34),
+		bgColor = cCard, borderColor = cBorder, titleColor = cMuted, valueColor = cText,
+	})
+
+	-- Activity Bar Chart Card
+	local chartCard = widgets.createRoundedFrame(container, {
+		name = "ActivityBars",
+		size = UDim2.new(1, 0, 0, 210),
+		position = UDim2.new(0, 0, 0, 114),
+		bgColor = cCard,
+		borderColor = cBorder,
+		cornerRadius = 8,
+		padding = 12,
+	})
+	widgets.createLabel(chartCard, {
+		text = "Session & Lifetime Activity",
+		size = UDim2.new(1, 0, 0, 20),
+		textColor = cText,
+		bold = true,
+	})
+
+	local bars = {
+		{ label = "Inspected Listings", val = vm.counters.inspectedListings, color = cAccent },
+		{ label = "Good Deals", val = vm.counters.goodDeals, color = cProfit },
+		{ label = "Submitted Offers", val = vm.counters.submittedOffers, color = theme.toColor3(theme.Colors.Info) },
+		{ label = "Accepted Trades", val = vm.counters.acceptedTrades, color = cProfit },
+		{ label = "Declined / Expired", val = vm.counters.declinedOffers + vm.counters.expiredOffers, color = theme.toColor3(theme.Colors.Loss) },
+	}
+	local maxVal = 1
+	for _, b in ipairs(bars) do
+		if b.val > maxVal then
+			maxVal = b.val
+		end
+	end
+
+	for i, b in ipairs(bars) do
+		local y = 26 + (i - 1) * 32
+		widgets.createLabel(chartCard, {
+			text = string.format("%s: %d", b.label, b.val),
+			position = UDim2.new(0, 0, 0, y),
+			size = UDim2.new(0, 190, 0, 20),
+			textColor = cMuted,
+			textSize = 12,
+		})
+		local bgBar = widgets.createRoundedFrame(chartCard, {
+			size = UDim2.new(1, -200, 0, 14),
+			position = UDim2.new(0, 195, 0, y + 3),
+			bgColor = theme.toColor3(theme.Colors.Background),
+			cornerRadius = 4,
+		})
+		local pct = math.clamp(b.val / maxVal, 0.02, 1)
+		widgets.createRoundedFrame(bgBar, {
+			size = UDim2.new(pct, 0, 1, 0),
+			bgColor = b.color,
+			cornerRadius = 4,
+		})
+	end
 end
 
 return AnalyticsPage
@@ -4857,12 +5707,15 @@ end
 __moduleSources["UI/SettingsPage"] = function(...)
 --[[
 	SettingsPage.luau
-	Live configuration controls for AMVGG refresh, scanner/timers, profit thresholds,
+	Interactive configuration controls for AMVGG refresh, timers, profit thresholds,
 	UI customization, notifications, and data management.
 ]]
 
 local SettingsPage = {}
 SettingsPage.__index = SettingsPage
+
+local LISTING_TTLS = { 30, 45, 60, 90, 120 }
+local OFFER_INTERVALS = { 30, 45, 60 }
 
 function SettingsPage.new(deps: { config: any, amvggProvider: any, scheduler: any, logger: any })
 	local self = setmetatable({}, SettingsPage)
@@ -4870,6 +5723,7 @@ function SettingsPage.new(deps: { config: any, amvggProvider: any, scheduler: an
 	self._amvgg = deps.amvggProvider
 	self._scheduler = deps.scheduler
 	self._logger = deps.logger
+	self._statusMsg = ""
 	return self
 end
 
@@ -4902,31 +5756,167 @@ function SettingsPage:resetDefaults()
 	self._config:saveToFile()
 end
 
+local function nextInCycle(list: { number }, current: number): number
+	for i, v in ipairs(list) do
+		if v == current then
+			return list[(i % #list) + 1]
+		end
+	end
+	return list[1]
+end
+
 function SettingsPage:render(container: any, theme: any, widgets: any)
 	if not (container and widgets and widgets.isRobloxGuiAvailable()) then
 		return
 	end
-	for _, child in ipairs(container:GetChildren()) do
-		child:Destroy()
-	end
+	widgets.clearChildren(container)
 	local s = self:getAllSettings()
+	local cText = theme.toColor3(theme.Colors.TextPrimary)
+	local cMuted = theme.toColor3(theme.Colors.TextMuted)
+	local cCard = theme.toColor3(theme.Colors.SurfaceAlt)
+	local cBorder = theme.toColor3(theme.Colors.Border)
+	local cAccent = theme.toColor3(theme.Colors.Accent)
+	local cProfit = theme.toColor3(theme.Colors.Profit)
+	local cLoss = theme.toColor3(theme.Colors.Loss)
+
 	widgets.createLabel(container, {
-		text = string.format(
-			"Settings  |  Listing TTL: %ds  |  Offer Check: %ds  |  Min Profit: %.1f%%  |  Mode: %s",
-			s.Trading.ListingExpirationSeconds, s.Trading.OfferResponseIntervalSeconds, s.Trading.MinProfitPercent, s.Trading.Mode
-		),
-		textColor = theme.toColor3(theme.Colors.TextPrimary),
+		text = "Settings & Safety Controls",
+		size = UDim2.new(1, 0, 0, 24),
+		textColor = cText,
+		textSize = 17,
 		bold = true,
 	})
-	widgets.createButton(container, {
-		text = "Reset Defaults",
+
+	local scroll = widgets.createScrollFrame(container, {
+		size = UDim2.new(1, 0, 1, -76),
 		position = UDim2.new(0, 0, 0, 32),
-		bgColor = theme.toColor3(theme.Colors.Loss),
-		textColor = theme.toColor3(theme.Colors.TextPrimary),
+		gap = 8,
+	})
+
+	local function addSettingRow(label: string, btnText: string, btnColor: any, onClick: () -> ())
+		local row = widgets.createRoundedFrame(scroll, {
+			size = UDim2.new(1, -8, 0, 44),
+			bgColor = cCard,
+			borderColor = cBorder,
+			cornerRadius = 6,
+			padding = 8,
+		})
+		widgets.createLabel(row, {
+			text = label,
+			size = UDim2.new(1, -150, 0, 26),
+			textColor = cText,
+			textSize = 13,
+		})
+		widgets.createButton(row, {
+			text = btnText,
+			size = UDim2.new(0, 136, 0, 28),
+			position = UDim2.new(1, -136, 0, 0),
+			bgColor = btnColor,
+			textColor = cText,
+			onClick = onClick,
+		})
+	end
+
+	addSettingRow(
+		"Listing Stale Timer (30 / 45 / 60 / 90 / 120s)",
+		tostring(s.Trading.ListingExpirationSeconds) .. "s",
+		cAccent,
+		function()
+			local nxt = nextInCycle(LISTING_TTLS, s.Trading.ListingExpirationSeconds)
+			self:setSetting("Trading.ListingExpirationSeconds", nxt)
+			self:render(container, theme, widgets)
+		end
+	)
+
+	addSettingRow(
+		"Offer Response Check Interval (30 / 45 / 60s)",
+		tostring(s.Trading.OfferResponseIntervalSeconds) .. "s",
+		cAccent,
+		function()
+			local nxt = nextInCycle(OFFER_INTERVALS, s.Trading.OfferResponseIntervalSeconds)
+			self:setSetting("Trading.OfferResponseIntervalSeconds", nxt)
+			self:render(container, theme, widgets)
+		end
+	)
+
+	addSettingRow(
+		"Minimum Profit % Filter (cycles +5%)",
+		string.format("%.1f%%", s.Trading.MinProfitPercent),
+		cAccent,
+		function()
+			local nxt = if s.Trading.MinProfitPercent >= 25 then 0 else s.Trading.MinProfitPercent + 5
+			self:setSetting("Trading.MinProfitPercent", nxt)
+			self:render(container, theme, widgets)
+		end
+	)
+
+	addSettingRow(
+		"Trading Mode (manual_confirm / practice)",
+		tostring(s.Trading.Mode),
+		cAccent,
+		function()
+			local nxt = if s.Trading.Mode == "manual_confirm" then "practice" else "manual_confirm"
+			self:setSetting("Trading.Mode", nxt)
+			self:render(container, theme, widgets)
+		end
+	)
+
+	addSettingRow(
+		"Kiria Companion Reactions",
+		if s.UI.KiriaEnabled then "ENABLED" else "DISABLED",
+		if s.UI.KiriaEnabled then cProfit else cLoss,
+		function()
+			self:setSetting("UI.KiriaEnabled", not s.UI.KiriaEnabled)
+			self:render(container, theme, widgets)
+		end
+	)
+
+	addSettingRow(
+		"Toast Notifications",
+		if s.UI.NotificationsEnabled then "ENABLED" else "DISABLED",
+		if s.UI.NotificationsEnabled then cProfit else cLoss,
+		function()
+			self:setSetting("UI.NotificationsEnabled", not s.UI.NotificationsEnabled)
+			self:render(container, theme, widgets)
+		end
+	)
+
+	-- Footer Actions
+	widgets.createButton(container, {
+		text = "Refresh AMVGG Now",
+		size = UDim2.new(0, 160, 0, 32),
+		position = UDim2.new(0, 0, 1, -34),
+		bgColor = cAccent,
+		textColor = cText,
 		onClick = function()
-			self:resetDefaults()
+			local ok, err = self:refreshAmvggNow()
+			self._statusMsg = if ok then "AMVGG refreshed" else tostring(err)
+			self:render(container, theme, widgets)
 		end,
 	})
+
+	widgets.createButton(container, {
+		text = "Reset Defaults",
+		size = UDim2.new(0, 140, 0, 32),
+		position = UDim2.new(0, 170, 1, -34),
+		bgColor = cLoss,
+		textColor = cText,
+		onClick = function()
+			self:resetDefaults()
+			self._statusMsg = "Defaults restored"
+			self:render(container, theme, widgets)
+		end,
+	})
+
+	if self._statusMsg ~= "" then
+		widgets.createLabel(container, {
+			text = self._statusMsg,
+			position = UDim2.new(0, 320, 1, -30),
+			size = UDim2.new(1, -320, 0, 22),
+			textColor = cMuted,
+			textSize = 12,
+		})
+	end
 end
 
 return SettingsPage
@@ -4936,8 +5926,8 @@ end
 __moduleSources["UI/MainWindow"] = function(...)
 --[[
 	MainWindow.luau
-	Root Dark Trading Terminal window coordinating navigation, top status bar,
-	Roblox ScreenGui lifecycle (when available), and clean teardown.
+	Root Dark Trading Terminal window coordinating navigation, draggable header bar,
+	AMVGG status pill, auto-refresh on events, and clean teardown.
 ]]
 
 local MainWindow = {}
@@ -4963,8 +5953,12 @@ function MainWindow.new(deps: {
 
 	self._activePage = "Dashboard"
 	self._visible = true
+	self._minimized = false
 	self._gui = nil :: any
+	self._root = nil :: any
 	self._contentFrame = nil :: any
+	self._navButtons = {} :: { [string]: any }
+	self._statusPill = nil :: any
 	self._connections = {} :: { any }
 	return self
 end
@@ -4973,14 +5967,32 @@ function MainWindow:getActivePage(): string
 	return self._activePage
 end
 
+function MainWindow:_refreshNavHighlights()
+	for name, btn in pairs(self._navButtons) do
+		if btn and btn.BackgroundColor3 ~= nil then
+			local isActive = (name == self._activePage)
+			btn.BackgroundColor3 = self._theme.toColor3(
+				if isActive then self._theme.Colors.Accent else self._theme.Colors.SurfaceAlt
+			)
+		end
+	end
+end
+
+function MainWindow:refreshCurrentPage()
+	if self._contentFrame and self._pages[self._activePage] then
+		self._pages[self._activePage]:render(self._contentFrame, self._theme, self._widgets, function(pageName: string)
+			self:navigate(pageName)
+		end)
+	end
+end
+
 function MainWindow:navigate(pageName: string): boolean
 	if not self._pages[pageName] then
 		return false
 	end
 	self._activePage = pageName
-	if self._contentFrame then
-		self._pages[pageName]:render(self._contentFrame, self._theme, self._widgets)
-	end
+	self:_refreshNavHighlights()
+	self:refreshCurrentPage()
 	if self._eventBus then
 		self._eventBus:emit("UI:Navigated", pageName)
 	end
@@ -5032,15 +6044,11 @@ function MainWindow:mount(parentGui: any?)
 	screenGui.Parent = targetParent
 	self._gui = screenGui
 
-	-- Keybind toggle (default RightShift)
 	pcall(function()
 		local UserInputService = game:GetService("UserInputService")
 		local keyName = tostring(self._config and self._config:get("UI.Keybind") or "RightShift")
 		local conn = UserInputService.InputBegan:Connect(function(input, gameProcessed)
-			if gameProcessed then
-				return
-			end
-			if input.KeyCode and input.KeyCode.Name == keyName then
+			if not gameProcessed and input.KeyCode and input.KeyCode.Name == keyName then
 				self:setVisible(not self._visible)
 			end
 		end)
@@ -5049,42 +6057,117 @@ function MainWindow:mount(parentGui: any?)
 
 	local root = self._widgets.createRoundedFrame(screenGui, {
 		name = "TerminalRoot",
-		size = UDim2.new(0, 860, 0, 540),
-		position = UDim2.new(0.5, -430, 0.5, -270),
+		size = UDim2.new(0, 880, 0, 560),
+		position = UDim2.new(0.5, -440, 0.5, -280),
 		bgColor = self._theme.toColor3(self._theme.Colors.Background),
 		borderColor = self._theme.toColor3(self._theme.Colors.Accent),
 		cornerRadius = 12,
 	})
+	self._root = root
+
+	-- Draggable Header Bar
+	local header = self._widgets.createRoundedFrame(root, {
+		name = "Header",
+		size = UDim2.new(1, -20, 0, 42),
+		position = UDim2.new(0, 10, 0, 10),
+		bgColor = self._theme.toColor3(self._theme.Colors.Surface),
+		borderColor = self._theme.toColor3(self._theme.Colors.Border),
+		cornerRadius = 8,
+	})
+	for _, c in ipairs(self._widgets.makeDraggable(root, header)) do
+		table.insert(self._connections, c)
+	end
+
+	self._widgets.createLabel(header, {
+		text = "KIRIA AUTOTRADER  •  AMVGG TERMINAL",
+		position = UDim2.new(0, 14, 0, 10),
+		size = UDim2.new(0, 340, 0, 22),
+		textColor = self._theme.toColor3(self._theme.Colors.AccentBright),
+		textSize = 14,
+		bold = true,
+	})
+
+	self._statusPill = self._widgets.createLabel(header, {
+		text = "RightShift: Toggle",
+		position = UDim2.new(1, -250, 0, 11),
+		size = UDim2.new(0, 160, 0, 20),
+		textColor = self._theme.toColor3(self._theme.Colors.TextMuted),
+		textSize = 11,
+		xAlign = Enum.TextXAlignment.Right,
+	})
+
+	self._widgets.createButton(header, {
+		name = "BtnMinimize",
+		text = "_",
+		size = UDim2.new(0, 28, 0, 26),
+		position = UDim2.new(1, -70, 0, 8),
+		bgColor = self._theme.toColor3(self._theme.Colors.SurfaceAlt),
+		textColor = self._theme.toColor3(self._theme.Colors.TextPrimary),
+		onClick = function()
+			self._minimized = not self._minimized
+			if self._root then
+				self._root.Size = if self._minimized then UDim2.new(0, 880, 0, 62) else UDim2.new(0, 880, 0, 560)
+			end
+			if self._contentFrame then
+				self._contentFrame.Visible = not self._minimized
+			end
+		end,
+	})
+
+	self._widgets.createButton(header, {
+		name = "BtnClose",
+		text = "X",
+		size = UDim2.new(0, 28, 0, 26),
+		position = UDim2.new(1, -36, 0, 8),
+		bgColor = self._theme.toColor3(self._theme.Colors.Loss),
+		textColor = self._theme.toColor3(self._theme.Colors.TextPrimary),
+		onClick = function()
+			self:setVisible(false)
+		end,
+	})
 
 	local sidebar = self._widgets.createRoundedFrame(root, {
 		name = "Sidebar",
-		size = UDim2.new(0, self._theme.Layout.SidebarWidth, 1, -20),
-		position = UDim2.new(0, 10, 0, 10),
+		size = UDim2.new(0, self._theme.Layout.SidebarWidth, 1, -72),
+		position = UDim2.new(0, 10, 0, 60),
 		bgColor = self._theme.toColor3(self._theme.Colors.Surface),
+		borderColor = self._theme.toColor3(self._theme.Colors.Border),
 		cornerRadius = 10,
 	})
 
 	for idx, pageName in ipairs(MainWindow.Pages) do
-		self._widgets.createButton(sidebar, {
+		local btn = self._widgets.createButton(sidebar, {
 			name = "Nav_" .. pageName,
 			text = pageName,
-			size = UDim2.new(1, -16, 0, 34),
-			position = UDim2.new(0, 8, 0, 12 + (idx - 1) * 42),
+			size = UDim2.new(1, -16, 0, 36),
+			position = UDim2.new(0, 8, 0, 12 + (idx - 1) * 44),
 			bgColor = self._theme.toColor3(self._theme.Colors.SurfaceAlt),
 			textColor = self._theme.toColor3(self._theme.Colors.TextPrimary),
 			onClick = function()
 				self:navigate(pageName)
 			end,
 		})
+		self._navButtons[pageName] = btn
 	end
 
 	self._contentFrame = self._widgets.createRoundedFrame(root, {
 		name = "Content",
-		size = UDim2.new(1, -(self._theme.Layout.SidebarWidth + 30), 1, -20),
-		position = UDim2.new(0, self._theme.Layout.SidebarWidth + 20, 0, 10),
+		size = UDim2.new(1, -(self._theme.Layout.SidebarWidth + 30), 1, -72),
+		position = UDim2.new(0, self._theme.Layout.SidebarWidth + 20, 0, 60),
 		bgColor = self._theme.toColor3(self._theme.Colors.Surface),
+		borderColor = self._theme.toColor3(self._theme.Colors.Border),
 		cornerRadius = 10,
+		padding = 14,
 	})
+
+	-- Auto-refresh active page when live data updates
+	if self._eventBus then
+		for _, evtName in ipairs({ "AMVGG:Refreshed", "AMVGG:StatusChanged", "Inventory:Updated", "Offer:Queued", "Offer:StatusChanged", "Trade:Confirmed", "Kiria:Message" }) do
+			table.insert(self._connections, self._eventBus:subscribe(evtName, function()
+				self:refreshCurrentPage()
+			end))
+		end
+	end
 
 	self:navigate(self._activePage)
 end
