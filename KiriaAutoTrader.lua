@@ -3880,6 +3880,7 @@ TradeHubAdapter.__index = TradeHubAdapter
 -- Known remote names to try (in order of preference)
 local REMOTE_CANDIDATES = {
 	-- folder / event combos: { folderName, eventName }
+	{ "adoptme_new_net", "adoptme_new.modules.TradeHub.TradeHubNet" },
 	{ "Remotes", "TradeHub_GetListings" },
 	{ "Remotes", "GetTradeHubListings" },
 	{ "Remotes", "TradingHub_Request" },
@@ -3915,6 +3916,7 @@ function TradeHubAdapter.new(opts: Options?)
 	local self = setmetatable({}, TradeHubAdapter)
 	self._logger   = o.logger
 	self._eventBus = o.eventBus
+	self._tradeHubNet    = nil
 	self._listingsRemote = nil
 	self._offerRemote    = nil
 	self._lastScan = {}
@@ -3933,6 +3935,17 @@ function TradeHubAdapter:_findRemotes()
 	if type(game) ~= "userdata" and type(game) ~= "table" then return end
 	local ok, RS = pcall(function() return game:GetService("ReplicatedStorage") end)
 	if not ok or not RS then return end
+
+	-- 0. Primary: Require ReplicatedStorage.new.modules.TradeHub.TradeHubNet directly
+	local okNet, netMod = pcall(function()
+		return require(RS:WaitForChild("new", 2):WaitForChild("modules", 2):WaitForChild("TradeHub", 2):WaitForChild("TradeHubNet", 2))
+	end)
+	if okNet and type(netMod) == "table" and netMod.search_listings_async then
+		self._tradeHubNet = netMod
+		self._available = true
+		self:_log("INFO", "Connected to ReplicatedStorage.new.modules.TradeHub.TradeHubNet")
+		return
+	end
 
 	-- Try to find listings remote
 	for _, candidate in ipairs(REMOTE_CANDIDATES) do
@@ -3969,6 +3982,29 @@ function TradeHubAdapter:_findRemotes()
 end
 
 function TradeHubAdapter:_scanAllRemotes(RS: any)
+	-- 1. Check adoptme_new_net folder specifically (Adopt Me's new TradeHub net)
+	local newNet = RS:FindFirstChild("adoptme_new_net")
+	if newNet then
+		for _, child in ipairs(newNet:GetChildren()) do
+			local name = child.Name:lower()
+			if name:find("tradehub") then
+				if not self._listingsRemote and (name:find("listing") or name:find("search") or name:find("get") or name:find("net")) then
+					if child.ClassName == "RemoteFunction" or child.ClassName == "RemoteEvent" then
+						self._listingsRemote = child
+						self:_log("INFO", "Auto-found adoptme_new_net listings remote: " .. child.Name)
+					end
+				end
+				if not self._offerRemote and (name:find("counter") or name:find("offer") or name:find("post")) then
+					if child.ClassName == "RemoteFunction" or child.ClassName == "RemoteEvent" then
+						self._offerRemote = child
+						self:_log("INFO", "Auto-found adoptme_new_net offer remote: " .. child.Name)
+					end
+				end
+			end
+		end
+	end
+
+	-- 2. Fallback: scan other folders
 	local function scanFolder(folder: any)
 		for _, child in ipairs(folder:GetChildren()) do
 			local name = child.Name:lower()
@@ -4009,6 +4045,34 @@ end
 -- Returns: { listings: { Listing }, error: string? }
 
 function TradeHubAdapter:fetchListings(): { listings: { Listing }, error: string? }
+	-- Primary: use TradeHubNet.search_listings_async
+	if self._tradeHubNet and self._tradeHubNet.search_listings_async then
+		local raw = nil
+		local ok, err = pcall(function()
+			local fn = self._tradeHubNet.search_listings_async
+			local req = {
+				lister_items_slugs = {},
+				responder_items = {},
+			}
+			if type(fn.invoke) == "function" then
+				raw = fn:invoke(req)
+			elseif type(fn.Invoke) == "function" then
+				raw = fn:Invoke(req)
+			elseif type(fn.call) == "function" then
+				raw = fn:call(req)
+			end
+		end)
+		if ok and type(raw) == "table" then
+			local listings: { Listing } = {}
+			self:_parseListings(raw.listings or raw.results or raw, listings)
+			self._lastScan = listings
+			self:_log("INFO", string.format("TradeHubNet fetched %d listings", #listings))
+			return { listings = listings }
+		elseif not ok then
+			self:_log("WARN", "TradeHubNet.search_listings_async error: " .. tostring(err))
+		end
+	end
+
 	if not self._listingsRemote then
 		return { listings = {}, error = "No Trade Hub remote found in ReplicatedStorage" }
 	end
@@ -4086,12 +4150,12 @@ function TradeHubAdapter:_parseEntry(entry: any): Listing?
 	if type(entry) ~= "table" then return nil end
 
 	-- Common field names observed in Adopt Me trade hub data
-	local sellerId   = tostring(entry.userId or entry.user_id or entry.seller or entry.id or "?")
-	local sellerName = tostring(entry.username or entry.name or entry.playerName or "Unknown")
+	local sellerId   = tostring(entry.listing_id or entry.userId or entry.user_id or entry.seller or entry.id or "?")
+	local sellerName = tostring(entry.username or entry.name or entry.playerName or "TradeHub")
 
-	-- What they offer (they give to you)
+	-- What they offer (they give to you): lister_items in TradeHubNet
 	local offeredPets: { string } = {}
-	local offerSrc = entry.offer or entry.offered or entry.giving or entry.pets or entry.items or {}
+	local offerSrc = entry.lister_items or entry.offer or entry.offered or entry.giving or entry.pets or entry.items or {}
 	if type(offerSrc) == "table" then
 		for _, p in ipairs(offerSrc) do
 			if type(p) == "string" then
@@ -4102,9 +4166,9 @@ function TradeHubAdapter:_parseEntry(entry: any): Listing?
 		end
 	end
 
-	-- What they want (they request from you)
+	-- What they want (they request from you): responder_items in TradeHubNet
 	local requestedPets: { string } = {}
-	local reqSrc = entry.request or entry.requested or entry.wanting or entry.want or {}
+	local reqSrc = entry.responder_items or entry.request or entry.requested or entry.wanting or entry.want or {}
 	if type(reqSrc) == "table" then
 		for _, p in ipairs(reqSrc) do
 			if type(p) == "string" then
@@ -4141,6 +4205,32 @@ function TradeHubAdapter:sendOffer(
 	offeredItems: { string },
 	requestedItems: { string }
 ): { success: boolean, error: string? }
+
+	-- Primary: use TradeHubNet.post_counter_async (targetUserId holds listing_id when from TradeHubNet)
+	if self._tradeHubNet and self._tradeHubNet.post_counter_async then
+		local ok, err = pcall(function()
+			local fn = self._tradeHubNet.post_counter_async
+			local req = {
+				listing_id = tostring(targetUserId),
+				responder_items_uniques = offeredItems,
+				auto_trade_mode = "post_counter_only",
+			}
+			if type(fn.invoke) == "function" then
+				fn:invoke(req)
+			elseif type(fn.Invoke) == "function" then
+				fn:Invoke(req)
+			elseif type(fn.call) == "function" then
+				fn:call(req)
+			end
+		end)
+		if ok then
+			self:_log("INFO", string.format("TradeHubNet.post_counter_async sent for listing=%s (offered=%d)", tostring(targetUserId), #offeredItems))
+			return { success = true }
+		else
+			self:_log("WARN", "TradeHubNet.post_counter_async error: " .. tostring(err))
+			return { success = false, error = tostring(err) }
+		end
+	end
 
 	if not self._offerRemote then
 		-- Try to find it now (remote might have loaded after init)
@@ -6781,6 +6871,37 @@ function MainWindow:mount(parentGui: any?)
 		})
 		self._navButtons[pageName] = btn
 	end
+
+	-- Unload button at bottom of sidebar (like menu:CreateButton("Unload"))
+	self._widgets.createButton(sidebar, {
+		name = "BtnUnload",
+		text = "Unload",
+		size = UDim2.new(1, -16, 0, 32),
+		position = UDim2.new(0, 8, 1, -44),
+		bgColor = self._theme.toColor3(self._theme.Colors.Loss),
+		textColor = self._theme.toColor3(self._theme.Colors.TextPrimary),
+		onClick = function()
+			self:destroy()
+		end,
+	})
+
+	-- Compact Watermark bar at top-left of ScreenGui
+	local wm = self._widgets.createRoundedFrame(self._screenGui, {
+		name = "KiriaWatermark",
+		size = UDim2.new(0, 320, 0, 28),
+		position = UDim2.new(0, 14, 0, 14),
+		bgColor = self._theme.toColor3(self._theme.Colors.Surface),
+		borderColor = self._theme.toColor3(self._theme.Colors.Accent),
+		cornerRadius = 6,
+		padding = 6,
+	})
+	self._widgets.createLabel(wm, {
+		text = "KIRIA AUTOTRADER  |  AMVGG  |  RightShift",
+		size = UDim2.new(1, 0, 1, 0),
+		textColor = self._theme.toColor3(self._theme.Colors.AccentBright),
+		textSize = 12,
+		bold = true,
+	})
 
 	self._contentFrame = self._widgets.createRoundedFrame(root, {
 		name = "Content",

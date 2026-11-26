@@ -252,6 +252,37 @@ function MainWindow:mount(parentGui: any?)
 		self._navButtons[pageName] = btn
 	end
 
+	-- Unload button at bottom of sidebar (like menu:CreateButton("Unload"))
+	self._widgets.createButton(sidebar, {
+		name = "BtnUnload",
+		text = "Unload",
+		size = UDim2.new(1, -16, 0, 32),
+		position = UDim2.new(0, 8, 1, -44),
+		bgColor = self._theme.toColor3(self._theme.Colors.Loss),
+		textColor = self._theme.toColor3(self._theme.Colors.TextPrimary),
+		onClick = function()
+			self:destroy()
+		end,
+	})
+
+	-- Compact Watermark bar at top-left of ScreenGui
+	local wm = self._widgets.createRoundedFrame(self._screenGui, {
+		name = "KiriaWatermark",
+		size = UDim2.new(0, 320, 0, 28),
+		position = UDim2.new(0, 14, 0, 14),
+		bgColor = self._theme.toColor3(self._theme.Colors.Surface),
+		borderColor = self._theme.toColor3(self._theme.Colors.Accent),
+		cornerRadius = 6,
+		padding = 6,
+	})
+	self._widgets.createLabel(wm, {
+		text = "KIRIA AUTOTRADER  |  AMVGG  |  RightShift",
+		size = UDim2.new(1, 0, 1, 0),
+		textColor = self._theme.toColor3(self._theme.Colors.AccentBright),
+		textSize = 12,
+		bold = true,
+	})
+
 	self._contentFrame = self._widgets.createRoundedFrame(root, {
 		name = "Content",
 		size = UDim2.new(1, -(self._theme.Layout.SidebarWidth + 30), 1, -72),
