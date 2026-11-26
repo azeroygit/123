@@ -4950,8 +4950,12 @@ function Widgets.createScrollFrame(parent: any, props: {
 	sf.Name = props.name or "Scroll"
 	sf.Size = props.size or UDim2.new(1, 0, 1, 0)
 	sf.Position = props.position or UDim2.new(0, 0, 0, 0)
-	sf.BackgroundColor3 = props.bgColor
-	sf.BackgroundTransparency = if props.bgColor then 0 else 1
+	if props.bgColor then
+		sf.BackgroundColor3 = props.bgColor
+		sf.BackgroundTransparency = 0
+	else
+		sf.BackgroundTransparency = 1
+	end
 	sf.BorderSizePixel = 0
 	sf.ScrollBarThickness = 5
 	sf.CanvasSize = UDim2.new(0, 0, 0, 0)
@@ -7380,6 +7384,8 @@ function Bootstrap.createApp(requireRelative: (string) -> any, adapters: Environ
 	local MainWindow = requireRelative("UI/MainWindow")
 
 	local notifications = Notifications.new({ eventBus = eventBus, config = config, clockFn = clockFn })
+	local runAutoTradeCycle: (boolean?) -> ()
+
 	local autoLoopApi = {
 		runNow = function()
 			runAutoTradeCycle(true)
@@ -7468,7 +7474,7 @@ function Bootstrap.createApp(requireRelative: (string) -> any, adapters: Environ
 	local offersSentThisSession = 0
 	local lastAutoScanTime = 0
 
-	local function runAutoTradeCycle(checkAll: boolean?)
+	runAutoTradeCycle = function(checkAll: boolean?)
 		if not checkAll and not autoMode then return end
 		lastAutoScanTime = clockFn()
 
