@@ -250,7 +250,7 @@ function Bootstrap.createApp(requireRelative: (string) -> any, adapters: Environ
 	local TaskScheduler = requireRelative("Core/TaskScheduler")
 	local ConfigManager = requireRelative("Core/ConfigManager")
 
-	local logger = Logger.new({ level = "INFO", fs = fs })
+	local logger = Logger.new({ level = "INFO", filePath = "kiria_debug.log", fs = fs })
 	local eventBus = EventBus.new(logger)
 	local state = StateManager.new(eventBus)
 	local errorHandler = ErrorHandler.new(logger, eventBus)
@@ -601,6 +601,16 @@ function Bootstrap.createApp(requireRelative: (string) -> any, adapters: Environ
 
 	local scanInterval = tonumber(config:get("Trading.ScanIntervalSeconds")) or 15
 	scheduler:addJob("auto_trade_loop", scanInterval, runAutoTradeCycle)
+
+	-- Run first auto-scan immediately on startup (don't wait 15s)
+	if env.autoStartScheduler then
+		if type(task) == "table" and type(task.spawn) == "function" then
+			task.spawn(function()
+				if type(task.wait) == "function" then task.wait(1.5) end
+				runAutoTradeCycle(false)
+			end)
+		end
+	end
 
 	-- expose toggle for UI
 	state:set("autoLoop.enabled", true)

@@ -90,6 +90,15 @@ function Logger:log(levelName: string, source: string, message: string)
 		pcall(self._fs.append, self._filePath, line)
 	end
 
+	if type(game) == "userdata" then
+		local out = string.format("[KIRIA][%s][%s] %s", entry.level, entry.source, entry.message)
+		if entry.level == "WARN" or entry.level == "ERROR" then
+			warn(out)
+		else
+			print(out)
+		end
+	end
+
 	for _, listener in ipairs(table.clone(self._listeners)) do
 		pcall(listener, entry)
 	end
