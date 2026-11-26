@@ -80,8 +80,12 @@ function Widgets.createScrollFrame(parent: any, props: {
 	sf.Name = props.name or "Scroll"
 	sf.Size = props.size or UDim2.new(1, 0, 1, 0)
 	sf.Position = props.position or UDim2.new(0, 0, 0, 0)
-	sf.BackgroundColor3 = props.bgColor
-	sf.BackgroundTransparency = if props.bgColor then 0 else 1
+	if props.bgColor then
+		sf.BackgroundColor3 = props.bgColor
+		sf.BackgroundTransparency = 0
+	else
+		sf.BackgroundTransparency = 1
+	end
 	sf.BorderSizePixel = 0
 	sf.ScrollBarThickness = 5
 	sf.CanvasSize = UDim2.new(0, 0, 0, 0)

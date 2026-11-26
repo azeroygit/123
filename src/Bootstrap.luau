@@ -434,6 +434,8 @@ function Bootstrap.createApp(requireRelative: (string) -> any, adapters: Environ
 	local MainWindow = requireRelative("UI/MainWindow")
 
 	local notifications = Notifications.new({ eventBus = eventBus, config = config, clockFn = clockFn })
+	local runAutoTradeCycle: (boolean?) -> ()
+
 	local autoLoopApi = {
 		runNow = function()
 			runAutoTradeCycle(true)
@@ -522,7 +524,7 @@ function Bootstrap.createApp(requireRelative: (string) -> any, adapters: Environ
 	local offersSentThisSession = 0
 	local lastAutoScanTime = 0
 
-	local function runAutoTradeCycle(checkAll: boolean?)
+	runAutoTradeCycle = function(checkAll: boolean?)
 		if not checkAll and not autoMode then return end
 		lastAutoScanTime = clockFn()
 
