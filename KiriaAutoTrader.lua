@@ -5221,6 +5221,7 @@ function Dashboard.new(deps: {
 	offerQueue: any,
 	tradeHistory: any,
 	kiria: any,
+	autoLoop: any?,
 })
 	local self = setmetatable({}, Dashboard)
 	self._amvgg = deps.amvggProvider
@@ -5229,6 +5230,7 @@ function Dashboard.new(deps: {
 	self._offerQueue = deps.offerQueue
 	self._history = deps.tradeHistory
 	self._kiria = deps.kiria
+	self._autoLoop = deps.autoLoop
 	self._lookupQuery = "Shadow Dragon"
 	return self
 end
@@ -5285,11 +5287,37 @@ function Dashboard:render(container: any, theme: any, widgets: any, navigateFn: 
 
 	widgets.createLabel(container, {
 		text = "Dashboard Overview",
-		size = UDim2.new(1, -150, 0, 24),
+		size = UDim2.new(1, -430, 0, 24),
 		textColor = cText,
 		textSize = 18,
 		bold = true,
 	})
+
+	if self._autoLoop then
+		local isAuto = self._autoLoop.getEnabled()
+		widgets.createButton(container, {
+			text = "Auto-Trade All",
+			size = UDim2.new(0, 140, 0, 30),
+			position = UDim2.new(1, -420, 0, 0),
+			bgColor = cProfit,
+			textColor = cText,
+			onClick = function()
+				self._autoLoop.runNow()
+				self:render(container, theme, widgets, navigateFn)
+			end,
+		})
+		widgets.createButton(container, {
+			text = if isAuto then "Auto: ON" else "Auto: OFF",
+			size = UDim2.new(0, 110, 0, 30),
+			position = UDim2.new(1, -270, 0, 0),
+			bgColor = if isAuto then cAccent else cCard,
+			textColor = cText,
+			onClick = function()
+				self._autoLoop.setEnabled(not isAuto)
+				self:render(container, theme, widgets, navigateFn)
+			end,
+		})
+	end
 
 	widgets.createButton(container, {
 		text = "Refresh AMVGG",
@@ -7231,6 +7259,25 @@ function Bootstrap.createApp(requireRelative: (string) -> any, adapters: Environ
 	local MainWindow = requireRelative("UI/MainWindow")
 
 	local notifications = Notifications.new({ eventBus = eventBus, config = config, clockFn = clockFn })
+	local autoLoopApi = {
+		runNow = function()
+			runAutoTradeCycle(true)
+		end,
+		getEnabled = function() return state:get("autoLoop.enabled") end,
+		setEnabled = function(v: boolean)
+			autoMode = v
+			state:set("autoLoop.enabled", v)
+			logger:info("[AutoLoop] " .. (v and "ENABLED" or "DISABLED"))
+		end,
+		getStats = function()
+			return {
+				offersSent = state:get("autoLoop.offersSentTotal") or 0,
+				lastScanAt = state:get("autoLoop.lastScanAt") or 0,
+				opportunities = state:get("autoLoop.opportunitiesFound") or 0,
+			}
+		end,
+	}
+
 	local pages = {
 		Dashboard = Dashboard.new({
 			amvggProvider = amvggProvider,
@@ -7239,6 +7286,7 @@ function Bootstrap.createApp(requireRelative: (string) -> any, adapters: Environ
 			offerQueue = offerQueue,
 			tradeHistory = tradeHistory,
 			kiria = kiria,
+			autoLoop = autoLoopApi,
 		}),
 		Listings = ListingsPage.new({
 			listingScanner = listingScanner,
@@ -7299,8 +7347,8 @@ function Bootstrap.createApp(requireRelative: (string) -> any, adapters: Environ
 	local offersSentThisSession = 0
 	local lastAutoScanTime = 0
 
-	local function runAutoTradeCycle()
-		if not autoMode then return end
+	local function runAutoTradeCycle(checkAll: boolean?)
+		if not checkAll and not autoMode then return end
 		lastAutoScanTime = clockFn()
 
 		-- 1. Sync inventory from game
@@ -7319,7 +7367,7 @@ function Bootstrap.createApp(requireRelative: (string) -> any, adapters: Environ
 		})
 
 		-- 3. For each GOOD DEAL: generate combo offer and auto-send
-		local maxOffersPerCycle = tonumber(config:get("Trading.MaxOffersPerCycle")) or 3
+		local maxOffersPerCycle = if checkAll then math.huge else (tonumber(config:get("Trading.MaxOffersPerCycle")) or 3)
 		local sent = 0
 		for _, opp in ipairs(opportunities) do
 			if sent >= maxOffersPerCycle then break end

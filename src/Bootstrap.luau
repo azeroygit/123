@@ -434,6 +434,25 @@ function Bootstrap.createApp(requireRelative: (string) -> any, adapters: Environ
 	local MainWindow = requireRelative("UI/MainWindow")
 
 	local notifications = Notifications.new({ eventBus = eventBus, config = config, clockFn = clockFn })
+	local autoLoopApi = {
+		runNow = function()
+			runAutoTradeCycle(true)
+		end,
+		getEnabled = function() return state:get("autoLoop.enabled") end,
+		setEnabled = function(v: boolean)
+			autoMode = v
+			state:set("autoLoop.enabled", v)
+			logger:info("[AutoLoop] " .. (v and "ENABLED" or "DISABLED"))
+		end,
+		getStats = function()
+			return {
+				offersSent = state:get("autoLoop.offersSentTotal") or 0,
+				lastScanAt = state:get("autoLoop.lastScanAt") or 0,
+				opportunities = state:get("autoLoop.opportunitiesFound") or 0,
+			}
+		end,
+	}
+
 	local pages = {
 		Dashboard = Dashboard.new({
 			amvggProvider = amvggProvider,
@@ -442,6 +461,7 @@ function Bootstrap.createApp(requireRelative: (string) -> any, adapters: Environ
 			offerQueue = offerQueue,
 			tradeHistory = tradeHistory,
 			kiria = kiria,
+			autoLoop = autoLoopApi,
 		}),
 		Listings = ListingsPage.new({
 			listingScanner = listingScanner,
@@ -502,8 +522,8 @@ function Bootstrap.createApp(requireRelative: (string) -> any, adapters: Environ
 	local offersSentThisSession = 0
 	local lastAutoScanTime = 0
 
-	local function runAutoTradeCycle()
-		if not autoMode then return end
+	local function runAutoTradeCycle(checkAll: boolean?)
+		if not checkAll and not autoMode then return end
 		lastAutoScanTime = clockFn()
 
 		-- 1. Sync inventory from game
@@ -522,7 +542,7 @@ function Bootstrap.createApp(requireRelative: (string) -> any, adapters: Environ
 		})
 
 		-- 3. For each GOOD DEAL: generate combo offer and auto-send
-		local maxOffersPerCycle = tonumber(config:get("Trading.MaxOffersPerCycle")) or 3
+		local maxOffersPerCycle = if checkAll then math.huge else (tonumber(config:get("Trading.MaxOffersPerCycle")) or 3)
 		local sent = 0
 		for _, opp in ipairs(opportunities) do
 			if sent >= maxOffersPerCycle then break end
